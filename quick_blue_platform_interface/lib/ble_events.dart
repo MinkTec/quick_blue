@@ -34,8 +34,10 @@ enum BleEvent {
   unkown,
   ;
 
-  static BleEvent parse(String string) => BleEvent.values
-      .firstWhere((e) => e.name == string, orElse: () => BleEvent.unkown);
+  static BleEvent parse(String string) => BleEvent.values.firstWhere(
+        (e) => e.name == string,
+        orElse: () => BleEvent.unkown,
+      );
 
   BleEventMessage package(EventDataMap data) {
     try {
@@ -64,6 +66,7 @@ enum BleEvent {
       BleEvent.characteristicWrite => CharacteristicWriteEvent(
           deviceId: data["deviceId"],
           status: data["status"],
+          value: data["value"],
           characteristic: data["characteristic"]),
       _ => GenericEventData(data: data)
     };
@@ -130,11 +133,23 @@ class ConnectionChangeEvent extends DeviceBoundEventData {
 class CharacteristicWriteEvent extends DeviceBoundEventData {
   final int status;
   final String characteristic;
+  final List<int>? value;
 
-  CharacteristicWriteEvent(
-      {required super.deviceId,
-      required this.status,
-      required this.characteristic});
+  CharacteristicWriteEvent({
+    required super.deviceId,
+    required this.status,
+    required this.characteristic,
+    this.value,
+  });
+
+  @override
+  String toString() {
+    return """CharacteristicWriteEvent{
+  characteristic : ${characteristic},
+  value : ${value},
+  status : ${status},
+}""";
+  }
 }
 
 class ServiceDiscoveredData extends DeviceBoundEventData {

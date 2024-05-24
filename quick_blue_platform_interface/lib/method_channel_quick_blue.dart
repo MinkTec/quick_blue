@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:logging/logging.dart';
 import 'package:quick_blue_platform_interface/ble_events.dart';
@@ -118,7 +119,7 @@ class MethodChannelQuickBlue extends QuickBluePlatform {
     } else if (message['type'] == "rssiRead") {
       onRssiRead?.call(message['deviceId'], message["rssi"]);
     } else if (message['type'] == "repopulatePeripherals") {
-        print(message);
+      print(message);
     }
 
     _eventMessageController
@@ -162,8 +163,17 @@ class MethodChannelQuickBlue extends QuickBluePlatform {
     }).then((_) {
       _log('writeValue invokeMethod success', logLevel: Level.ALL);
     }).catchError((onError) {
-      // Characteristic sometimes unavailable on Android
-      throw onError;
+      // sometimes android reports a fialed write, but writes the value anyways
+      if (Platform.isAndroid) {
+        bleEventStream.firstWhere((x) {
+          return x.data is CharacteristicWriteEvent &&
+              listEquals(value, (x.data as CharacteristicWriteEvent).value);
+        }).timeout(Duration(milliseconds: 1250), onTimeout: () {
+          throw onError;
+        });
+      } else {
+        throw onError;
+      }
     });
   }
 

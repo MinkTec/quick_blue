@@ -119,7 +119,6 @@ class QuickBlueLinux extends QuickBluePlatform {
   void discoverServices(String deviceId) {
     if (onServiceDiscovered == null) return;
     _device(deviceId)!.gattServices.forEach((e) {
-      print("e.uuid: " + e.characteristics.join(" - "));
       onServiceDiscovered!(deviceId, e.uuid.toString(),
           e.characteristics.map((e) => e.uuid.toString()).toList());
     });

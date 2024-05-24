@@ -64,6 +64,9 @@ class QuickBluePlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamHand
 
   private val knownGatts = mutableListOf<BluetoothGatt>()
 
+  private val knownServicesWithCharacteristics :
+          MutableList<Pair<String,Pair<BluetoothGattService,List<BluetoothGattCharacteristic>>>> = mutableListOf();
+
   private fun sendMessage(messageChannel: BasicMessageChannel<Any>, message: Map<String, Any>) {
     mainThreadHandler.post { messageChannel.send(message) }
   }
@@ -137,7 +140,12 @@ class QuickBluePlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamHand
         val deviceId = call.argument<String>("deviceId")!!
         val gatt = knownGatts.find { it.device.address == deviceId }
                 ?: return result.error("IllegalArgument", "Unknown deviceId: $deviceId", null)
-        gatt.discoverServices()
+
+        var success = gatt.discoverServices()
+        sendMessage(messageConnector, mapOf(
+          "type" to "servicesDiscovered",
+          "success" to success
+        ))
         result.success(null)
       }
       "setNotifiable" -> {
@@ -186,7 +194,7 @@ class QuickBluePlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamHand
         if (readResult == true)
           result.success(null)
         else
-          result.error("Characteristic unavailable", null, null)
+          result.error("read characteristic unavailable ${service} ${characteristic}", null, null)
       }
       "writeValue" -> {
         val deviceId = call.argument<String>("deviceId")!!
@@ -195,14 +203,27 @@ class QuickBluePlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamHand
         val value = call.argument<ByteArray>("value")!!
         val gatt = knownGatts.find { it.device.address == deviceId }
                 ?: return result.error("IllegalArgument", "Unknown deviceId: $deviceId", null)
-        val writeResult = gatt.getCharacteristic(service to characteristic)?.let {
-          it.value = value
-          gatt.writeCharacteristic(it)
+
+        val serviceObj : BluetoothGattService = gatt.getService(UUID.fromString(service))!!
+
+        var pair : Pair<BluetoothGattService, List<BluetoothGattCharacteristic>>? = knownServicesWithCharacteristics.filter {
+          it.first == deviceId && it.second.first == serviceObj
+        }?.first()?.second
+
+        pair?.let {
+          it.second.filter {
+            it.getUuid() == UUID.fromString(characteristic)
+          }.first()?.let {
+            it.value = value
+            val response = gatt.writeCharacteristic(it);
+            if (response) {
+              result.success(null)
+            } else {
+              result.error("Write characteristic unavailable ${service} ${characteristic}", null, null)
+            }
+          }
         }
-        if (writeResult == true)
-          result.success(null)
-        else
-          result.error("Characteristic unavailable", null, null)
+        return;
       }
       else -> {
         result.notImplemented()
@@ -212,6 +233,10 @@ class QuickBluePlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamHand
 
   private fun cleanConnection(gatt: BluetoothGatt) {
     knownGatts.remove(gatt)
+    var servicesToRemove = knownServicesWithCharacteristics.filter {
+      it.first == gatt.device.address
+    }
+    knownServicesWithCharacteristics.removeAll(servicesToRemove)
     gatt.disconnect()
     gatt.close()
   }
@@ -292,6 +317,9 @@ class QuickBluePlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamHand
 
       gatt.services?.forEach { service ->
         Log.v(TAG, "Service " + service.uuid)
+
+        knownServicesWithCharacteristics.add(gatt.device.address to (service to service.characteristics))
+
         service.characteristics.forEach { characteristic ->
           Log.v(TAG, "    Characteristic ${characteristic.uuid}")
           characteristic.descriptors.forEach {
@@ -337,6 +365,7 @@ class QuickBluePlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamHand
         "type" to "characteristicWrite",
         "deviceId" to gatt?.device?.address.toString(),
         "characteristic" to characteristic.getUuid().toString(),
+        "value" to characteristic.value,
         "status" to status
       ))
     }
