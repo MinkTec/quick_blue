@@ -4,7 +4,9 @@ import 'package:equatable/equatable.dart';
 
 class BlueConnectionState extends Equatable {
   static const disconnected = BlueConnectionState._('disconnected');
+  static const disconnecting = BlueConnectionState._('disconnecting');
   static const connected = BlueConnectionState._('connected');
+  static const connecting = BlueConnectionState._('connecting');
 
   final String value;
 
@@ -15,6 +17,10 @@ class BlueConnectionState extends Equatable {
       return disconnected;
     } else if (value == connected.value) {
       return connected;
+    } else if (value == disconnected.value) {
+      return disconnecting;
+    } else if (value == connecting.value) {
+      return connecting;
     }
     throw ArgumentError.value(value);
   }

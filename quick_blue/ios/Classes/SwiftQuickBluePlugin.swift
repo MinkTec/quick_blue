@@ -113,7 +113,7 @@ public class SwiftQuickBluePlugin: NSObject, FlutterPlugin {
         return;
       }
 		  peripheral.delegate = self
-		  manager.connect(peripheral)
+        manager.connect(peripheral, options: ["CBCentralManagerOptionShouldAutoReconnect": true])
 		  result(nil)
 	  case "disconnect":
 		  let arguments = call.arguments as! Dictionary<String, Any>
