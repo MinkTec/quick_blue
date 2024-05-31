@@ -120,10 +120,12 @@ class MethodChannelQuickBlue extends QuickBluePlatform {
       onRssiRead?.call(message['deviceId'], message["rssi"]);
     } else if (message['type'] == "repopulatePeripherals") {
       print(message);
+    } else if (message['type'] != null) {
+      _eventMessageController
+          .add(BleEvent.parse(message["type"]).package(message));
+    } else {
+      print('unknown message: $message');
     }
-
-    _eventMessageController
-        .add(BleEvent.parse(message["type"]).package(message));
   }
 
   @override

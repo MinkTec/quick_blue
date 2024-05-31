@@ -68,8 +68,14 @@ public class QuickBlueMacosPlugin: NSObject, FlutterPlugin {
     case "isBluetoothAvailable":
       result(manager.state == .poweredOn)
     case "startScan":
-      manager.scanForPeripherals(withServices: nil)
-      result(nil)
+        let arguments = call.arguments as! Dictionary<String, Any>
+        if let serviceId = arguments["serviceId"] as? String {
+            manager.scanForPeripherals(withServices: [CBUUID(string: serviceId)])
+        } else {
+            manager.scanForPeripherals(withServices: nil)
+        }
+        
+        result(nil)
     case "stopScan":
       manager.stopScan()
       result(nil)
