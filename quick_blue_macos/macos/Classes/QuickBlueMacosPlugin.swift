@@ -273,7 +273,7 @@ extension QuickBlueMacosPlugin: CBPeripheralDelegate {
   }
 
   public func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
-      print("peripheral:didUpdateValueForForCharacteristic \(characteristic.uuid) \(characteristic.value! as NSData) error: \(String(describing: error))")
+      // print("peripheral:didUpdateValueForForCharacteristic \(characteristic.uuid) \(characteristic.value! as NSData) error: \(String(describing: error))")
     self.messageConnector.sendMessage([
       "deviceId": peripheral.uuid.uuidString,
       "characteristicValue": [
