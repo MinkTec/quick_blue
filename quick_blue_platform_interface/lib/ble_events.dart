@@ -20,6 +20,7 @@ typedef EventDataMap = Map;
 enum BleEvent {
   connected,
   disconnected,
+  disconnecting,
   mtuChanged,
   characteristicRead,
   characteristicChanged,

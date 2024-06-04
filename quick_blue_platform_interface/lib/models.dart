@@ -18,6 +18,8 @@ class BlueConnectionState extends Equatable {
     } else if (value == connected.value) {
       return connected;
     } else if (value == disconnected.value) {
+      return disconnected;
+    } else if (value == disconnecting.value) {
       return disconnecting;
     } else if (value == connecting.value) {
       return connecting;
