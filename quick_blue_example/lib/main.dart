@@ -31,7 +31,7 @@ class _MyAppState extends State<MyApp> {
   }
 
   void _toggleScan() {
-    _isScanning ? QuickBlue.stopScan() : QuickBlue.startScan();
+    _isScanning ? QuickBlue.stopScan() : QuickBlue.startScan(serviceId:"6e400001-c352-11e5-953d-0002a5d5c51b" );
     setState(() => _isScanning = !_isScanning);
   }
 

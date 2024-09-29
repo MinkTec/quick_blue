@@ -2,9 +2,11 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:quick_blue_linux/quick_blue_linux.dart';
 import 'package:quick_blue_platform_interface/ble_events.dart';
 import 'package:quick_blue_platform_interface/quick_blue_platform_interface.dart';
+import 'package:quick_blue_web/quick_blue_web.dart';
 
 import 'models.dart';
 
@@ -23,8 +25,11 @@ QuickBluePlatform get _instance {
   if (_manualDartRegistrationNeeded) {
     // Only do the initial registration if it hasn't already been overridden
     // with a non-default instance.
-    QuickBluePlatform.instance =
-        Platform.isLinux ? QuickBlueLinux() : MethodChannelQuickBlue();
+    QuickBluePlatform.instance = kIsWeb
+        ? QuickBlueWeb()
+        : Platform.isLinux
+            ? QuickBlueLinux()
+            : MethodChannelQuickBlue();
     _manualDartRegistrationNeeded = false;
   }
 

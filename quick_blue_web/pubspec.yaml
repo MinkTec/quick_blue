@@ -1,0 +1,25 @@
+name: quick_blue_web
+description: "A new Flutter plugin project."
+version: 0.0.1
+homepage:
+
+environment:
+  sdk: ^3.4.0
+  flutter: '>=3.3.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  quick_blue_platform_interface:
+    git:
+      url: https://github.com/MinkTec/quick_blue
+      ref: HEAD
+      path: quick_blue_platform_interface
+  flutter_web_bluetooth: ^0.2.3
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+
