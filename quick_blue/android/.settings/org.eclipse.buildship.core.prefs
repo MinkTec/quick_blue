@@ -1,7 +1,10 @@
+<<<<<<< HEAD
 arguments=--init-script /home/jonas/.config/Code/User/globalStorage/redhat.java/1.34.0/config_linux/org.eclipse.osgi/55/0/.cp/gradle/init/init.gradle --init-script /home/jonas/.config/Code/User/globalStorage/redhat.java/1.34.0/config_linux/org.eclipse.osgi/55/0/.cp/gradle/protobuf/init.gradle
 auto.sync=false
 build.scans.enabled=false
 connection.gradle.distribution=GRADLE_DISTRIBUTION(WRAPPER)
+=======
+>>>>>>> a93878ebebc8a10bb879534f2804e0a23c8f36bf
 connection.project.dir=../../../app/android
 eclipse.preferences.version=1
 gradle.user.home=

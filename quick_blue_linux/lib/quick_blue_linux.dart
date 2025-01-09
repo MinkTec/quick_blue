@@ -73,7 +73,7 @@ class QuickBlueLinux extends QuickBluePlatform {
     _log('stopScan invoke success');
 
     try {
-      _activeAdapter!.stopDiscovery();
+      await _activeAdapter!.stopDiscovery();
     } catch (e) {
       _log("no scan was running");
     }
@@ -97,18 +97,23 @@ class QuickBlueLinux extends QuickBluePlatform {
       });
 
   @override
-  Future<void> connect(String deviceId, {bool? auto}) {
-    return _device(deviceId)!.connect().whenComplete(() {
-      if (onConnectionChanged != null) {
-        onConnectionChanged!(deviceId, BlueConnectionState.connected);
-      }
-    });
-    _device(deviceId)!.setTrusted(true);
+  Future<void> connect(String deviceId, {bool? auto}) async {
+    try {
+      final connect = _device(deviceId)?.connect();
+
+      connect?.whenComplete(() {
+        if (onConnectionChanged != null) {
+          onConnectionChanged!(deviceId, BlueConnectionState.connected);
+        }
+      });
+    } catch (e) {
+      print("quick_blue: ${e}");
+    }
   }
 
   @override
-  Future<void> disconnect(String deviceId) {
-    return _device(deviceId)!.disconnect().whenComplete(() {
+  Future<void> disconnect(String deviceId) async {
+    return _device(deviceId)?.disconnect().whenComplete(() {
       if (onConnectionChanged != null) {
         onConnectionChanged!(deviceId, BlueConnectionState.disconnected);
       }
