@@ -91,81 +91,147 @@ struct BluetoothDeviceAgent {
 
   ~BluetoothDeviceAgent() { device = nullptr; }
 
-  IAsyncOperation<GattDeviceService> GetServiceAsync(std::string service) {
-    if (gattServices.count(service) == 0) {
-      auto serviceResult = co_await device.GetGattServicesAsync();
-      if (serviceResult.Status() != GattCommunicationStatus::Success)
-        co_return nullptr;
-
-      for (auto s : serviceResult.Services())
-        if (to_uuidstr(s.Uuid()) == service)
-          gattServices.insert(std::make_pair(service, s));
-    }
-    co_return gattServices.at(service);
+  bool IsConnected() const {
+    return device &&
+           device.ConnectionStatus() == BluetoothConnectionStatus::Connected;
   }
 
-  // Also modify BluetoothDeviceAgent's GetCharacteristicAsync to better handle
-  // errors
+  IAsyncOperation<GattDeviceService>
+  BluetoothDeviceAgent::GetServiceAsync(std::string service) {
+    // First check if device is valid
+    if (!device) {
+      OutputDebugString(L"GetServiceAsync: Device is null\n");
+      co_return nullptr;
+    }
+
+    try {
+      // Check if we already have the service cached
+      if (gattServices.count(service) > 0) {
+        // Verify the cached service is still valid
+        auto &cachedService = gattServices.at(service);
+        if (cachedService) {
+          co_return cachedService;
+        } else {
+          // Remove invalid cached service
+          OutputDebugString(
+              (L"GetServiceAsync: Cached service is invalid, removing: " +
+               winrt::to_hstring(service) + L"\n")
+                  .c_str());
+          gattServices.erase(service);
+        }
+      }
+
+      // Get services
+      OutputDebugString((L"GetServiceAsync: Getting services for: " +
+                         winrt::to_hstring(service) + L"\n")
+                            .c_str());
+      auto serviceResult = co_await device.GetGattServicesAsync();
+
+      if (serviceResult == nullptr ||
+          serviceResult.Status() != GattCommunicationStatus::Success) {
+        OutputDebugString(
+            (L"GetServiceAsync: Failed to get services, status: " +
+             (serviceResult ? winrt::to_hstring((int32_t)serviceResult.Status())
+                            : L"null") +
+             L"\n")
+                .c_str());
+        co_return nullptr;
+      }
+
+      // Search for the requested service
+      for (auto s : serviceResult.Services()) {
+        if (s && to_uuidstr(s.Uuid()) == service) {
+          gattServices.insert(std::make_pair(service, s));
+          co_return s;
+        }
+      }
+
+      // Service not found
+      OutputDebugString((L"GetServiceAsync: Service not found: " +
+                         winrt::to_hstring(service) + L"\n")
+                            .c_str());
+      co_return nullptr;
+    } catch (const winrt::hresult_error &ex) {
+      OutputDebugString((L"GetServiceAsync exception: " + ex.message() +
+                         L", code: " + winrt::to_hstring(ex.code()) + L"\n")
+                            .c_str());
+      co_return nullptr;
+    } catch (...) {
+      OutputDebugString(L"GetServiceAsync unknown exception\n");
+      co_return nullptr;
+    }
+  }
+
   IAsyncOperation<GattCharacteristic>
   BluetoothDeviceAgent::GetCharacteristicAsync(std::string service,
                                                std::string characteristic) {
+
+    // First check if device is valid
     if (!device) {
       OutputDebugString(L"GetCharacteristicAsync: Device is null\n");
       co_return nullptr;
     }
 
     try {
-      if (gattCharacteristics.count(characteristic) == 0) {
-        auto gattService = co_await GetServiceAsync(service);
-
-        if (!gattService) {
-          OutputDebugString((L"GetCharacteristicAsync: Service not found: " +
-                             winrt::to_hstring(service) + L"\n")
-                                .c_str());
-          co_return nullptr;
-        }
-
-        auto characteristicResult =
-            co_await gattService.GetCharacteristicsAsync();
-        if (characteristicResult.Status() != GattCommunicationStatus::Success) {
-          OutputDebugString(
-              (L"GetCharacteristicAsync: Failed to get characteristics, "
-               L"status: " +
-               winrt::to_hstring((int32_t)characteristicResult.Status()) +
-               L"\n")
-                  .c_str());
-          co_return nullptr;
-        }
-
-        for (auto c : characteristicResult.Characteristics()) {
-          if (to_uuidstr(c.Uuid()) == characteristic) {
-            gattCharacteristics.insert(std::make_pair(characteristic, c));
-            break;
-          }
-        }
-
-        // Check if we found the characteristic
-        if (gattCharacteristics.count(characteristic) == 0) {
-          OutputDebugString((L"GetCharacteristicAsync: Characteristic not "
-                             L"found in service: " +
+      // Check if we already have the characteristic cached
+      if (gattCharacteristics.count(characteristic) > 0) {
+        // Verify the cached characteristic is still valid
+        auto &cachedCharacteristic = gattCharacteristics.at(characteristic);
+        if (cachedCharacteristic) {
+          co_return cachedCharacteristic;
+        } else {
+          // Remove invalid cached characteristic
+          OutputDebugString((L"GetCharacteristicAsync: Cached characteristic "
+                             L"is invalid, removing: " +
                              winrt::to_hstring(characteristic) + L"\n")
                                 .c_str());
-          co_return nullptr;
+          gattCharacteristics.erase(characteristic);
         }
       }
 
-      // Make sure the characteristic is still valid
-      auto &characteristicRef = gattCharacteristics.at(characteristic);
-      if (!characteristicRef) {
-        OutputDebugString(
-            (L"GetCharacteristicAsync: Cached characteristic is null: " +
-             winrt::to_hstring(characteristic) + L"\n")
-                .c_str());
-        gattCharacteristics.erase(characteristic);
+      // Get the service
+      auto gattService = co_await GetServiceAsync(service);
+      if (!gattService) {
+        OutputDebugString((L"GetCharacteristicAsync: Service not found: " +
+                           winrt::to_hstring(service) + L"\n")
+                              .c_str());
         co_return nullptr;
       }
 
-      co_return characteristicRef;
+      // Get characteristics
+      OutputDebugString(
+          (L"GetCharacteristicAsync: Getting characteristics for: " +
+           winrt::to_hstring(characteristic) + L"\n")
+              .c_str());
+      auto characteristicResult =
+          co_await gattService.GetCharacteristicsAsync();
+
+      if (characteristicResult == nullptr ||
+          characteristicResult.Status() != GattCommunicationStatus::Success) {
+        OutputDebugString(
+            (L"GetCharacteristicAsync: Failed to get characteristics, "
+             L"status: " +
+             (characteristicResult
+                  ? winrt::to_hstring((int32_t)characteristicResult.Status())
+                  : L"null") +
+             L"\n")
+                .c_str());
+        co_return nullptr;
+      }
+
+      // Search for the requested characteristic
+      for (auto c : characteristicResult.Characteristics()) {
+        if (c && to_uuidstr(c.Uuid()) == characteristic) {
+          gattCharacteristics.insert(std::make_pair(characteristic, c));
+          co_return c;
+        }
+      }
+
+      // Characteristic not found
+      OutputDebugString((L"GetCharacteristicAsync: Characteristic not found: " +
+                         winrt::to_hstring(characteristic) + L"\n")
+                            .c_str());
+      co_return nullptr;
     } catch (const winrt::hresult_error &ex) {
       OutputDebugString((L"GetCharacteristicAsync exception: " + ex.message() +
                          L", code: " + winrt::to_hstring(ex.code()) + L"\n")
@@ -533,19 +599,31 @@ QuickBlueWindowsPlugin::ConnectAsync(uint64_t bluetoothAddress) {
 
 void QuickBlueWindowsPlugin::BluetoothLEDevice_ConnectionStatusChanged(
     BluetoothLEDevice sender, IInspectable args) {
-  OutputDebugString((L"ConnectionStatusChanged " +
-                     winrt::to_hstring((int32_t)sender.ConnectionStatus()) +
-                     L"\n")
-                        .c_str());
-  if (sender.ConnectionStatus() == BluetoothConnectionStatus::Disconnected) {
-    CleanConnection(sender.BluetoothAddress());
-    message_connector_->Send(EncodableMap{
-        {"deviceId", std::to_string(sender.BluetoothAddress())},
-        {"ConnectionState", "disconnected"},
-    });
+  try {
+    OutputDebugString(
+        (L"ConnectionStatusChanged: Device " +
+         winrt::to_hstring(sender.BluetoothAddress()) + L", Status: " +
+         winrt::to_hstring((int32_t)sender.ConnectionStatus()) + L"\n")
+            .c_str());
+
+    if (sender.ConnectionStatus() == BluetoothConnectionStatus::Disconnected) {
+      // Clean up all resources related to this device
+      CleanConnection(sender.BluetoothAddress());
+
+      // Notify the Dart side
+      message_connector_->Send(EncodableMap{
+          {"deviceId", std::to_string(sender.BluetoothAddress())},
+          {"ConnectionState", "disconnected"},
+      });
+    }
+  } catch (const std::exception &ex) {
+    OutputDebugString((L"ConnectionStatusChanged exception: " +
+                       winrt::to_hstring(ex.what()) + L"\n")
+                          .c_str());
+  } catch (...) {
+    OutputDebugString(L"ConnectionStatusChanged unknown exception\n");
   }
 }
-
 void QuickBlueWindowsPlugin::CleanConnection(uint64_t bluetoothAddress) {
   try {
     auto it = connectedDevices.find(bluetoothAddress);
@@ -717,16 +795,24 @@ winrt::fire_and_forget QuickBlueWindowsPlugin::SetNotifiableAsync(
     BluetoothDeviceAgent &bluetoothDeviceAgent, std::string service,
     std::string characteristic, std::string bleInputProperty) {
   try {
-    if (!bluetoothDeviceAgent.device) {
+    // Critical section - first check if device is still valid and connected
+    if (!bluetoothDeviceAgent.device || !bluetoothDeviceAgent.IsConnected()) {
       OutputDebugString(
           L"SetNotifiableAsync: Device is null or disconnected\n");
       co_return;
     }
 
+    OutputDebugString((L"SetNotifiableAsync: Starting for characteristic: " +
+                       winrt::to_hstring(characteristic) + L", property: " +
+                       winrt::to_hstring(bleInputProperty) + L"\n")
+                          .c_str());
+
+    // Get the characteristic
     auto gattCharacteristic =
         co_await bluetoothDeviceAgent.GetCharacteristicAsync(service,
                                                              characteristic);
 
+    // Check if the characteristic was found
     if (!gattCharacteristic) {
       OutputDebugString((L"SetNotifiableAsync: Characteristic not found: " +
                          winrt::to_hstring(characteristic) + L"\n")
@@ -734,12 +820,40 @@ winrt::fire_and_forget QuickBlueWindowsPlugin::SetNotifiableAsync(
       co_return;
     }
 
+    // If we're disabling notifications, remove the value changed handler first
+    if (bleInputProperty == "disabled") {
+      // Check if we have a token for this characteristic
+      if (bluetoothDeviceAgent.valueChangedTokens.count(characteristic) > 0) {
+        try {
+          // Remove the event handler
+          auto token = bluetoothDeviceAgent.valueChangedTokens[characteristic];
+          gattCharacteristic.ValueChanged(token);
+          bluetoothDeviceAgent.valueChangedTokens.erase(characteristic);
+          OutputDebugString(
+              (L"SetNotifiableAsync: Removed notification handler for: " +
+               winrt::to_hstring(characteristic) + L"\n")
+                  .c_str());
+        } catch (const std::exception &ex) {
+          OutputDebugString(
+              (L"SetNotifiableAsync: Error removing notification handler: " +
+               winrt::to_hstring(ex.what()) + L"\n")
+                  .c_str());
+        }
+      }
+    }
+
+    // Determine the descriptor value based on the property
     auto descriptorValue =
         bleInputProperty == "notification"
             ? GattClientCharacteristicConfigurationDescriptorValue::Notify
         : bleInputProperty == "indication"
             ? GattClientCharacteristicConfigurationDescriptorValue::Indicate
             : GattClientCharacteristicConfigurationDescriptorValue::None;
+
+    // Write the descriptor
+    OutputDebugString((L"SetNotifiableAsync: Writing descriptor for: " +
+                       winrt::to_hstring(characteristic) + L"\n")
+                          .c_str());
 
     auto writeDescriptorStatus =
         co_await gattCharacteristic
@@ -748,19 +862,46 @@ winrt::fire_and_forget QuickBlueWindowsPlugin::SetNotifiableAsync(
 
     if (writeDescriptorStatus != GattCommunicationStatus::Success) {
       OutputDebugString(
-          (L"WriteClientCharacteristicConfigurationDescriptorAsync failed: " +
+          (L"SetNotifiableAsync: Failed to write descriptor, status: " +
            winrt::to_hstring((int32_t)writeDescriptorStatus) + L"\n")
               .c_str());
+      co_return;
     }
 
+    // If we're enabling notifications, add a value changed handler
     if (bleInputProperty != "disabled") {
-      bluetoothDeviceAgent.valueChangedTokens[characteristic] =
-          gattCharacteristic.ValueChanged(
-              {this, &QuickBlueWindowsPlugin::GattCharacteristic_ValueChanged});
-    } else {
-      gattCharacteristic.ValueChanged(std::exchange(
-          bluetoothDeviceAgent.valueChangedTokens[characteristic], {}));
+      // Remove any existing handler first
+      if (bluetoothDeviceAgent.valueChangedTokens.count(characteristic) > 0) {
+        try {
+          auto token = bluetoothDeviceAgent.valueChangedTokens[characteristic];
+          gattCharacteristic.ValueChanged(token);
+          bluetoothDeviceAgent.valueChangedTokens.erase(characteristic);
+        } catch (...) {
+          OutputDebugString(L"SetNotifiableAsync: Error removing existing "
+                            L"notification handler\n");
+        }
+      }
+
+      // Add the new handler
+      try {
+        auto token = gattCharacteristic.ValueChanged(
+            {this, &QuickBlueWindowsPlugin::GattCharacteristic_ValueChanged});
+        bluetoothDeviceAgent.valueChangedTokens[characteristic] = token;
+        OutputDebugString(
+            (L"SetNotifiableAsync: Added notification handler for: " +
+             winrt::to_hstring(characteristic) + L"\n")
+                .c_str());
+      } catch (const std::exception &ex) {
+        OutputDebugString(
+            (L"SetNotifiableAsync: Error adding notification handler: " +
+             winrt::to_hstring(ex.what()) + L"\n")
+                .c_str());
+      }
     }
+
+    OutputDebugString((L"SetNotifiableAsync: Successfully set property for: " +
+                       winrt::to_hstring(characteristic) + L"\n")
+                          .c_str());
   } catch (const winrt::hresult_error &ex) {
     OutputDebugString((L"SetNotifiableAsync exception: " + ex.message() +
                        L", code: " + winrt::to_hstring(ex.code()) + L"\n")
@@ -838,61 +979,62 @@ winrt::fire_and_forget QuickBlueWindowsPlugin::WriteValueAsync(
     std::string bleOutputProperty) {
   try {
     // Critical section - first check if device is still valid
-    if (!bluetoothDeviceAgent.device) {
+    if (!bluetoothDeviceAgent.device ||
+        bluetoothDeviceAgent.device.ConnectionStatus() !=
+            BluetoothConnectionStatus::Connected) {
       OutputDebugString(L"WriteValueAsync: Device is null or disconnected\n");
       co_return;
     }
 
-    // Get the GATT characteristic - use a local variable to keep it alive
-    // during the operation
-    GattCharacteristic gattCharacteristic = nullptr;
-    try {
-      // Get the characteristic
-      gattCharacteristic = co_await bluetoothDeviceAgent.GetCharacteristicAsync(
-          service, characteristic);
+    OutputDebugString((L"WriteValueAsync: Starting for characteristic: " +
+                       winrt::to_hstring(characteristic) + L", value size: " +
+                       winrt::to_hstring(value.size()) + L"\n")
+                          .c_str());
 
-      // Check if the characteristic was found
-      if (!gattCharacteristic) {
-        OutputDebugString((L"WriteValueAsync: Characteristic not found: " +
-                           winrt::to_hstring(characteristic) + L"\n")
-                              .c_str());
-        co_return;
-      }
+    // Create a copy of the vector to avoid potential memory issues
+    auto valueCopy = std::vector<uint8_t>(value);
 
-      // Prepare write option
-      auto writeOption = bleOutputProperty.compare("withoutResponse") == 0
-                             ? GattWriteOption::WriteWithoutResponse
-                             : GattWriteOption::WriteWithResponse;
+    // Get the characteristic
+    auto gattCharacteristic =
+        co_await bluetoothDeviceAgent.GetCharacteristicAsync(service,
+                                                             characteristic);
 
-      // Create buffer from value
-      auto buffer = from_bytevc(value);
-
-      // Write value to characteristic
-      auto writeValueStatus =
-          co_await gattCharacteristic.WriteValueAsync(buffer, writeOption);
-
-      OutputDebugString((L"WriteValueAsync " +
-                         winrt::to_hstring(characteristic) + L", " +
-                         winrt::to_hstring(to_hexstring(value)) + L", " +
-                         winrt::to_hstring((int32_t)writeValueStatus) + L"\n")
+    // Check if the characteristic was found
+    if (!gattCharacteristic) {
+      OutputDebugString((L"WriteValueAsync: Characteristic not found: " +
+                         winrt::to_hstring(characteristic) + L"\n")
                             .c_str());
-
-      // Notify the caller of the write status
-      if (writeValueStatus != GattCommunicationStatus::Success) {
-        OutputDebugString((L"WriteValueAsync failed with status: " +
-                           winrt::to_hstring((int32_t)writeValueStatus) + L"\n")
-                              .c_str());
-      }
-    } catch (const winrt::hresult_error &ex) {
-      OutputDebugString((L"WriteValueAsync inner exception: " + ex.message() +
-                         L", code: " + winrt::to_hstring(ex.code()) + L"\n")
-                            .c_str());
+      co_return;
     }
 
-    // Explicitly set characteristic to null to ensure proper resource cleanup
-    gattCharacteristic = nullptr;
+    // Prepare write option
+    auto writeOption = bleOutputProperty.compare("withoutResponse") == 0
+                           ? GattWriteOption::WriteWithoutResponse
+                           : GattWriteOption::WriteWithResponse;
+
+    // Create buffer from value
+    auto buffer = from_bytevc(valueCopy);
+
+    OutputDebugString((L"WriteValueAsync: About to write to characteristic: " +
+                       winrt::to_hstring(characteristic) + L"\n")
+                          .c_str());
+
+    // Write value to characteristic
+    auto writeValueStatus =
+        co_await gattCharacteristic.WriteValueAsync(buffer, writeOption);
+
+    OutputDebugString((L"WriteValueAsync: Completed with status: " +
+                       winrt::to_hstring((int32_t)writeValueStatus) + L"\n")
+                          .c_str());
+
+    // Notify the caller of the write status
+    if (writeValueStatus != GattCommunicationStatus::Success) {
+      OutputDebugString((L"WriteValueAsync failed with status: " +
+                         winrt::to_hstring((int32_t)writeValueStatus) + L"\n")
+                            .c_str());
+    }
   } catch (const winrt::hresult_error &ex) {
-    OutputDebugString((L"WriteValueAsync outer exception: " + ex.message() +
+    OutputDebugString((L"WriteValueAsync exception: " + ex.message() +
                        L", code: " + winrt::to_hstring(ex.code()) + L"\n")
                           .c_str());
   } catch (const std::exception &ex) {
@@ -906,21 +1048,86 @@ winrt::fire_and_forget QuickBlueWindowsPlugin::WriteValueAsync(
 
 void QuickBlueWindowsPlugin::GattCharacteristic_ValueChanged(
     GattCharacteristic sender, GattValueChangedEventArgs args) {
-  auto uuid = to_uuidstr(sender.Uuid());
-  auto bytes = to_bytevc(args.CharacteristicValue());
-  OutputDebugString((L"GattCharacteristic_ValueChanged " +
-                     winrt::to_hstring(uuid) + L", " +
-                     winrt::to_hstring(to_hexstring(bytes)) + L"\n")
-                        .c_str());
-  message_connector_->Send(EncodableMap{
-      {"deviceId",
-       std::to_string(sender.Service().Device().BluetoothAddress())},
-      {"characteristicValue",
-       EncodableMap{
-           {"characteristic", uuid},
-           {"value", bytes},
-       }},
-  });
+  try {
+    if (!sender) {
+      OutputDebugString(L"GattCharacteristic_ValueChanged: Sender is null\n");
+      return;
+    }
+
+    if (!args) {
+      OutputDebugString(L"GattCharacteristic_ValueChanged: Args is null\n");
+      return;
+    }
+
+    auto uuid = to_uuidstr(sender.Uuid());
+
+    OutputDebugString(
+        (L"GattCharacteristic_ValueChanged: Event for characteristic: " +
+         winrt::to_hstring(uuid) + L"\n")
+            .c_str());
+
+    // Get the value from the arguments
+    auto value = args.CharacteristicValue();
+    if (!value) {
+      OutputDebugString(
+          L"GattCharacteristic_ValueChanged: Value buffer is null\n");
+      return;
+    }
+
+    auto bytes = to_bytevc(value);
+
+    // Get device address
+    uint64_t deviceAddress = 0;
+    try {
+      auto service = sender.Service();
+      if (!service) {
+        OutputDebugString(
+            L"GattCharacteristic_ValueChanged: Service is null\n");
+        return;
+      }
+
+      auto device = service.Device();
+      if (!device) {
+        OutputDebugString(L"GattCharacteristic_ValueChanged: Device is null\n");
+        return;
+      }
+
+      deviceAddress = device.BluetoothAddress();
+    } catch (const std::exception &ex) {
+      OutputDebugString(
+          (L"GattCharacteristic_ValueChanged: Error getting device address: " +
+           winrt::to_hstring(ex.what()) + L"\n")
+              .c_str());
+      return;
+    }
+
+    OutputDebugString((L"GattCharacteristic_ValueChanged: Received " +
+                       winrt::to_hstring(bytes.size()) +
+                       L" bytes from device " +
+                       winrt::to_hstring(deviceAddress) + L"\n")
+                          .c_str());
+
+    // Send the value back to Dart
+    message_connector_->Send(EncodableMap{
+        {"deviceId", std::to_string(deviceAddress)},
+        {"characteristicValue",
+         EncodableMap{
+             {"characteristic", uuid},
+             {"value", bytes},
+         }},
+    });
+  } catch (const winrt::hresult_error &ex) {
+    OutputDebugString((L"GattCharacteristic_ValueChanged exception: " +
+                       ex.message() + L", code: " +
+                       winrt::to_hstring(ex.code()) + L"\n")
+                          .c_str());
+  } catch (const std::exception &ex) {
+    OutputDebugString((L"GattCharacteristic_ValueChanged std exception: " +
+                       winrt::to_hstring(ex.what()) + L"\n")
+                          .c_str());
+  } catch (...) {
+    OutputDebugString(L"GattCharacteristic_ValueChanged unknown exception\n");
+  }
 }
 
 extern "C" __declspec(dllexport) void QuickBlueWindowsPluginRegisterWithRegistrar(
