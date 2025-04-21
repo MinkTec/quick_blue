@@ -1,7 +1,8 @@
-cmake_minimum_required(VERSION 3.15)
+cmake_minimum_required(VERSION 3.20)
 set(PROJECT_NAME "quick_blue_windows")
 project(${PROJECT_NAME} LANGUAGES CXX)
 
+cmake_policy(SET CMP0153 OLD)
 set(PLUGIN_NAME "${PROJECT_NAME}_plugin")
 
 find_program(NUGET_EXE NAMES nuget)
