@@ -31,7 +31,11 @@ dependencies:
       url: https://github.com/MinkTec/quick_blue
       ref: HEAD
       path: quick_blue_linux
-  quick_blue_web: any
+  quick_blue_web:
+    git:
+      url: https://github.com/MinkTec/quick_blue
+      ref: HEAD
+      path: quick_blue_web
   convert: ^3.0.0
   equatable: ^2.0.5
 
