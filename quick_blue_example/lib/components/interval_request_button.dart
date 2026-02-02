@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:quick_blue/quick_blue.dart';
-import 'package:quick_blue_example/extensions/widget.dart';
 
 class IntervalRequestButton extends StatefulWidget {
   final String deviceId;

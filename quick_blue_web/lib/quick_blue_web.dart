@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:flutter_web_bluetooth/js_web_bluetooth.dart';
 import 'package:quick_blue_platform_interface/ble_events.dart';
 import 'package:quick_blue_platform_interface/quick_blue_platform_interface.dart';
+import 'package:quick_blue_platform_interface/background_presence.dart';
 import 'package:flutter_web_bluetooth/flutter_web_bluetooth.dart' as ble;
 import 'package:flutter_web_bluetooth/web_bluetooth_logger.dart';
 import 'package:quick_blue_web/models/available_device.dart';
@@ -164,5 +165,83 @@ class QuickBlueWeb extends QuickBluePlatform {
       case BleOutputProperty.withoutResponse:
         return await char.writeValueWithoutResponse(value);
     }
+  }
+
+  // ============ Background Presence API (not supported on Web) ============
+
+  @override
+  Future<BackgroundPresenceCapabilities>
+      getBackgroundPresenceCapabilities() async {
+    return const BackgroundPresenceCapabilities(
+      isSupported: false,
+      requiresAssociation: false,
+      presenceObservationAvailable: false,
+      minimumOsVersion: 'N/A',
+      currentOsVersion: 'Web',
+    );
+  }
+
+  @override
+  Future<void> registerBackgroundWakeCallback(
+      int dispatcherHandle, int callbackHandle) async {
+    throw UnimplementedError(
+        "background wake callback is not supported on Web");
+  }
+
+  @override
+  Future<DeviceAssociationResult> associateDevice({
+    required String namePattern,
+    bool singleDevice = true,
+  }) async {
+    return DeviceAssociationResult.failure(
+      errorMessage: 'Device association is not supported on Web',
+      errorCode: AssociationErrorCode.notSupported,
+    );
+  }
+
+  @override
+  Future<void> startBackgroundPresenceObservation(
+    String deviceId, {
+    int? associationId,
+  }) async {
+    throw UnimplementedError(
+        "background presence observation is not supported on Web");
+  }
+
+  @override
+  Future<void> stopBackgroundPresenceObservation(
+    String deviceId, {
+    int? associationId,
+  }) async {
+    throw UnimplementedError(
+        "background presence observation is not supported on Web");
+  }
+
+  @override
+  Future<List<DeviceAssociationResult>> getBackgroundObservedDevices() async {
+    return [];
+  }
+
+  @override
+  Future<void> removeBackgroundObservation(
+    String deviceId, {
+    int? associationId,
+  }) async {
+    throw UnimplementedError(
+        "background observation removal is not supported on Web");
+  }
+
+  @override
+  Future<void> setAutoBleCommandOnAppear({
+    required String serviceUuid,
+    required String characteristicUuid,
+    required Uint8List command,
+  }) async {
+    throw UnimplementedError("auto BLE command is not supported on Web");
+  }
+
+  @override
+  Future<void> clearAutoBleCommandOnAppear() async {
+    throw UnimplementedError("auto BLE command is not supported on Web");
   }
 }

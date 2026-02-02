@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:logging/logging.dart';
 import 'package:quick_blue_platform_interface/ble_events.dart';
+import 'package:quick_blue_platform_interface/background_presence.dart';
 
 import 'quick_blue_platform_interface.dart';
 
@@ -14,6 +15,8 @@ class MethodChannelQuickBlue extends QuickBluePlatform {
       const EventChannel('quick_blue/event.scanResult');
   static const _message_connector = const BasicMessageChannel(
       'quick_blue/message.connector', StandardMessageCodec());
+  static const MethodChannel _backgroundChannel =
+      MethodChannel('quick_blue/background');
 
   MethodChannelQuickBlue() {
     _message_connector.setMessageHandler(_handleConnectorMessage);
@@ -47,9 +50,10 @@ class MethodChannelQuickBlue extends QuickBluePlatform {
 
   @override
   Future<void> stopScan() {
+    print("scanStop Stacktrace: ${StackTrace.current}");
     return _method
         .invokeMethod('stopScan')
-        .then((_) => print('stopScan invokeMethod success'));
+        .then((_) => _log('stopScan invokeMethod success'));
   }
 
   Stream<dynamic> scanResultStream =
@@ -99,6 +103,12 @@ class MethodChannelQuickBlue extends QuickBluePlatform {
       BlueConnectionState connectionState =
           BlueConnectionState.parse(message['ConnectionState']);
       onConnectionChanged?.call(deviceId, connectionState);
+
+      // Also send to event stream for state restoration test page
+      if (message['type'] != null) {
+        _eventMessageController
+            .add(BleEvent.parse(message["type"]).package(message));
+      }
     } else if (message['ServiceState'] != null) {
       if (message['ServiceState'] == 'discovered') {
         String deviceId = message['deviceId'];
@@ -118,6 +128,22 @@ class MethodChannelQuickBlue extends QuickBluePlatform {
       _mtuConfigController.add(message['mtuConfig']);
     } else if (message['type'] == "rssiRead") {
       onRssiRead?.call(message['deviceId'], message["rssi"]);
+    } else if (message['type'] == "backgroundStateRestoration") {
+      // Legacy handler - convert to new BackgroundWakeEvent format
+      final restoredPeripherals =
+          (message['restoredPeripherals'] as List).cast<String>();
+      if (restoredPeripherals.isNotEmpty) {
+        _handleBackgroundWakeEvent({
+          'deviceId': restoredPeripherals.first,
+          'deviceName': null,
+          'wakeType': BackgroundWakeType.stateRestored.name,
+          'associationId': null,
+          'timestamp': DateTime.now().millisecondsSinceEpoch,
+        });
+      }
+    } else if (message['type'] == "backgroundWakeEvent") {
+      // New unified background wake event handler
+      _handleBackgroundWakeEvent(message);
     } else if (message['type'] == "repopulatePeripherals") {
       print(message);
     } else if (message['type'] != null) {
@@ -127,6 +153,8 @@ class MethodChannelQuickBlue extends QuickBluePlatform {
       print('unknown message: $message');
     }
   }
+
+  
 
   @override
   Future<void> setNotifiable(String deviceId, String service,
@@ -208,5 +236,186 @@ class MethodChannelQuickBlue extends QuickBluePlatform {
       'deviceId': deviceId,
       'priority': priority.value,
     }).then((_) => _log("requestConnectionPriority invokeMethod success"));
+  }
+
+  // ============ Background Presence API Implementation ============
+
+  /// Stored callback handles for background wake events
+  void _handleBackgroundWakeEvent(dynamic message) {
+    final event = BackgroundWakeEvent.fromMap(message);
+
+    if (message['wakeType'] == BackgroundWakeType.stateRestored.name) {
+      _eventMessageController.add(BleEvent.parse('stateRestored').package({
+        'restoredPeripherals': [event.deviceId],
+      }));
+    } else if (message['wakeType'] ==
+        BackgroundWakeType.pendingConnectionRestored.name) {
+      _eventMessageController.add(BleEvent.parse('pendingConnectionRestored')
+          .package({'deviceId': event.deviceId}));
+    }
+
+    _eventMessageController.add(BleEvent.parse(
+      event.wakeType == BackgroundWakeType.deviceAppeared
+          ? 'deviceAppeared'
+          : event.wakeType == BackgroundWakeType.deviceDisappeared
+              ? 'deviceDisappeared'
+              : event.wakeType.name,
+    ).package({
+      'deviceId': event.deviceId,
+      'deviceName': event.deviceName,
+      'wakeType': event.wakeType.name,
+      'associationId': event.associationId,
+      'timestamp': event.timestamp.millisecondsSinceEpoch,
+    }));
+
+    _backgroundChannel.invokeMethod('onPresenceEvent', message).then(
+      (_) => _log('background wake event forwarded'),
+    );
+  }
+
+  @override
+  Future<BackgroundPresenceCapabilities>
+      getBackgroundPresenceCapabilities() async {
+    final result = await _method.invokeMethod<Map<dynamic, dynamic>>(
+        'getBackgroundPresenceCapabilities');
+    if (result == null) {
+      // Return default capabilities if platform doesn't respond
+      return BackgroundPresenceCapabilities(
+        isSupported: Platform.isIOS || Platform.isAndroid,
+        requiresAssociation: Platform.isAndroid,
+        presenceObservationAvailable: Platform.isIOS,
+      );
+    }
+    return BackgroundPresenceCapabilities.fromMap(result);
+  }
+
+  @override
+  Future<void> registerBackgroundWakeCallback(
+      int dispatcherHandle, int callbackHandle) async {
+    await _method.invokeMethod('registerBackgroundWakeCallback', {
+      'dispatcherHandle': dispatcherHandle,
+      'callbackHandle': callbackHandle,
+    });
+    _log('registerBackgroundWakeCallback invokeMethod success');
+  }
+
+  @override
+  Future<DeviceAssociationResult> associateDevice({
+    required String namePattern,
+    bool singleDevice = true,
+  }) async {
+    try {
+      final result = await _method.invokeMethod<Map<dynamic, dynamic>>(
+        'associateDevice',
+        {
+          'namePattern': namePattern,
+          'singleDevice': singleDevice,
+        },
+      );
+
+      if (result == null) {
+        return DeviceAssociationResult.failure(
+          errorMessage: 'No result returned from native',
+          errorCode: AssociationErrorCode.unknown,
+        );
+      }
+
+      return DeviceAssociationResult.fromMap(result);
+    } on PlatformException catch (e) {
+      return DeviceAssociationResult.failure(
+        errorMessage: e.message ?? 'Platform error',
+        errorCode: _mapAssociationErrorCode(e.code),
+      );
+    }
+  }
+
+  AssociationErrorCode _mapAssociationErrorCode(String code) {
+    switch (code) {
+      case 'USER_CANCELLED':
+        return AssociationErrorCode.userCancelled;
+      case 'NO_DEVICE_FOUND':
+        return AssociationErrorCode.noDeviceFound;
+      case 'BLUETOOTH_UNAVAILABLE':
+        return AssociationErrorCode.bluetoothUnavailable;
+      case 'CDM_UNAVAILABLE':
+        return AssociationErrorCode.cdmUnavailable;
+      case 'PERMISSION_DENIED':
+        return AssociationErrorCode.permissionDenied;
+      case 'ACTIVITY_UNAVAILABLE':
+        return AssociationErrorCode.activityUnavailable;
+      case 'NOT_SUPPORTED':
+        return AssociationErrorCode.notSupported;
+      default:
+        return AssociationErrorCode.unknown;
+    }
+  }
+
+  @override
+  Future<void> startBackgroundPresenceObservation(
+    String deviceId, {
+    int? associationId,
+  }) async {
+    await _method.invokeMethod('startBackgroundPresenceObservation', {
+      'deviceId': deviceId,
+      'associationId': associationId,
+    });
+    _log('startBackgroundPresenceObservation invokeMethod success');
+  }
+
+  @override
+  Future<void> stopBackgroundPresenceObservation(
+    String deviceId, {
+    int? associationId,
+  }) async {
+    await _method.invokeMethod('stopBackgroundPresenceObservation', {
+      'deviceId': deviceId,
+      'associationId': associationId,
+    });
+    _log('stopBackgroundPresenceObservation invokeMethod success');
+  }
+
+  @override
+  Future<List<DeviceAssociationResult>> getBackgroundObservedDevices() async {
+    final result = await _method
+        .invokeMethod<List<dynamic>>('getBackgroundObservedDevices');
+
+    if (result == null) return [];
+
+    return result
+        .cast<Map<dynamic, dynamic>>()
+        .map((map) => DeviceAssociationResult.fromMap(map))
+        .toList();
+  }
+
+  @override
+  Future<void> removeBackgroundObservation(
+    String deviceId, {
+    int? associationId,
+  }) async {
+    await _method.invokeMethod('removeBackgroundObservation', {
+      'deviceId': deviceId,
+      'associationId': associationId,
+    });
+    _log('removeBackgroundObservation invokeMethod success');
+  }
+
+  @override
+  Future<void> setAutoBleCommandOnAppear({
+    required String serviceUuid,
+    required String characteristicUuid,
+    required Uint8List command,
+  }) async {
+    await _method.invokeMethod('setAutoBleCommandOnAppear', {
+      'serviceUuid': serviceUuid,
+      'characteristicUuid': characteristicUuid,
+      'command': command.toList(),
+    });
+    _log('setAutoBleCommandOnAppear invokeMethod success');
+  }
+
+  @override
+  Future<void> clearAutoBleCommandOnAppear() async {
+    await _method.invokeMethod('clearAutoBleCommandOnAppear');
+    _log('clearAutoBleCommandOnAppear invokeMethod success');
   }
 }

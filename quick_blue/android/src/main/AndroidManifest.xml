@@ -1,7 +1,14 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
   package="com.example.quick_blue">
+  
+  <!-- Required for Companion Device Manager -->
+  <uses-feature
+      android:name="android.software.companion_device_setup"
+      android:required="false" />
+
   <uses-permission android:name="android.permission.BLUETOOTH_SCAN"
     android:usesPermissionFlags="neverForLocation" />
+  
   <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
 
   <!-- legacy for Android 11 or lower -->
@@ -14,4 +21,45 @@
   <!-- legacy for Android 9 or lower -->
   <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"
     android:maxSdkVersion="28" />
+
+  <!-- Companion Device Manager specific permissions -->
+  <!-- These allow the app to run in background when woken by device presence -->
+  <uses-permission android:name="android.permission.REQUEST_COMPANION_RUN_IN_BACKGROUND" />
+  <uses-permission android:name="android.permission.REQUEST_COMPANION_START_FOREGROUND_SERVICES_FROM_BACKGROUND" />
+  
+  <!-- Required for Android 12+ to observe companion device presence -->
+  <uses-permission android:name="android.permission.REQUEST_OBSERVE_COMPANION_DEVICE_PRESENCE" />
+  
+  <!-- Required for Android 13+ to use CDM profiles -->
+  <uses-permission android:name="android.permission.REQUEST_COMPANION_PROFILE_WATCH"
+      android:required="false" />
+
+  <!-- Foreground service permission for background processing -->
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+
+  <!-- Wake lock for keeping CPU awake during background processing -->
+  <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+  <application>
+    <!--
+    CompanionPresenceService - The core background service
+    
+    This service extends android.companion.CompanionDeviceService and receives
+    callbacks when paired companion devices appear or disappear.
+    
+    CRITICAL: The permission attribute is REQUIRED for Android to bind to this service.
+    Without it, the system will not deliver presence events.
+    -->
+    <service
+        android:name=".CompanionPresenceService"
+        android:exported="true"
+        android:label="Quick Blue Presence Service"
+        android:permission="android.permission.BIND_COMPANION_DEVICE_SERVICE">
+        
+        <intent-filter>
+            <action android:name="android.companion.CompanionDeviceService" />
+        </intent-filter>
+    </service>
+  </application>
 </manifest>

@@ -6,6 +6,7 @@ import 'package:collection/collection.dart';
 import 'package:logging/logging.dart';
 import 'package:quick_blue_platform_interface/ble_events.dart';
 import 'package:quick_blue_platform_interface/quick_blue_platform_interface.dart';
+import 'package:quick_blue_platform_interface/background_presence.dart';
 
 class QuickBlueLinux extends QuickBluePlatform {
   bool isInitialized = false;
@@ -212,6 +213,80 @@ class QuickBlueLinux extends QuickBluePlatform {
 
   @override
   Stream<BleEventMessage> get bleEventStream => throw UnimplementedError();
+
+  // ============ Background Presence API (not supported on Linux) ============
+
+  @override
+  Future<BackgroundPresenceCapabilities>
+      getBackgroundPresenceCapabilities() async {
+    return const BackgroundPresenceCapabilities(
+      isSupported: false,
+      requiresAssociation: false,
+      presenceObservationAvailable: false,
+      minimumOsVersion: 'N/A',
+      currentOsVersion: 'Linux',
+    );
+  }
+
+  @override
+  Future<void> registerBackgroundWakeCallback(
+      int dispatcherHandle, int callbackHandle) async {
+    _log("background wake callback is not supported on Linux");
+  }
+
+  @override
+  Future<DeviceAssociationResult> associateDevice({
+    required String namePattern,
+    bool singleDevice = true,
+  }) async {
+    return DeviceAssociationResult.failure(
+      errorMessage: 'Device association is not supported on Linux',
+      errorCode: AssociationErrorCode.notSupported,
+    );
+  }
+
+  @override
+  Future<void> startBackgroundPresenceObservation(
+    String deviceId, {
+    int? associationId,
+  }) async {
+    _log("background presence observation is not supported on Linux");
+  }
+
+  @override
+  Future<void> stopBackgroundPresenceObservation(
+    String deviceId, {
+    int? associationId,
+  }) async {
+    _log("background presence observation is not supported on Linux");
+  }
+
+  @override
+  Future<List<DeviceAssociationResult>> getBackgroundObservedDevices() async {
+    return [];
+  }
+
+  @override
+  Future<void> removeBackgroundObservation(
+    String deviceId, {
+    int? associationId,
+  }) async {
+    _log("background observation removal is not supported on Linux");
+  }
+
+  @override
+  Future<void> setAutoBleCommandOnAppear({
+    required String serviceUuid,
+    required String characteristicUuid,
+    required Uint8List command,
+  }) async {
+    _log("auto BLE command is not supported on Linux");
+  }
+
+  @override
+  Future<void> clearAutoBleCommandOnAppear() async {
+    _log("auto BLE command is not supported on Linux");
+  }
 }
 
 extension BlueZDeviceExtension on BlueZDevice {

@@ -32,6 +32,10 @@ enum BleEvent {
   scanFailed,
   scanResult,
   connectionUpdate,
+  stateRestored,
+  pendingConnectionRestored,
+  deviceAppeared,
+  deviceDisappeared,
   unkown,
   ;
 
@@ -69,6 +73,21 @@ enum BleEvent {
           status: data["status"],
           value: data["value"],
           characteristic: data["characteristic"]),
+      BleEvent.stateRestored => StateRestoredEvent(
+          restoredPeripherals:
+              (data["restoredPeripherals"] as List).cast<String>()),
+      BleEvent.pendingConnectionRestored =>
+        PendingConnectionRestoredEvent(deviceId: data["deviceId"]),
+      BleEvent.deviceAppeared => DevicePresenceEvent(
+          deviceId: data["deviceId"],
+          deviceName: data["deviceName"],
+          associationId: data["associationId"],
+          appeared: true),
+      BleEvent.deviceDisappeared => DevicePresenceEvent(
+          deviceId: data["deviceId"],
+          deviceName: data["deviceName"],
+          associationId: data["associationId"],
+          appeared: false),
       _ => GenericEventData(data: data)
     };
   }
@@ -168,4 +187,47 @@ class ServiceDiscoveredData extends DeviceBoundEventData {
     ${characteristics.join("\n")}
 """;
   }
+}
+
+class StateRestoredEvent extends EventData {
+  StateRestoredEvent({required this.restoredPeripherals});
+
+  final List<String> restoredPeripherals;
+
+  @override
+  String toString() =>
+      "StateRestored: ${restoredPeripherals.length} peripherals";
+}
+
+class PendingConnectionRestoredEvent extends DeviceBoundEventData {
+  PendingConnectionRestoredEvent({required super.deviceId});
+
+  @override
+  String toString() => "PendingConnectionRestored: $deviceId";
+}
+
+/// Event fired when a device appears or disappears (background presence).
+///
+/// On Android, this is triggered by the Companion Device Manager.
+/// On iOS, this corresponds to state restoration events.
+class DevicePresenceEvent extends DeviceBoundEventData {
+  DevicePresenceEvent({
+    required super.deviceId,
+    this.deviceName,
+    this.associationId,
+    required this.appeared,
+  });
+
+  /// The name of the device, if available.
+  final String? deviceName;
+
+  /// The association ID (Android only, API 33+).
+  final int? associationId;
+
+  /// True if device appeared, false if disappeared.
+  final bool appeared;
+
+  @override
+  String toString() =>
+      "DevicePresence: $deviceId ${appeared ? 'appeared' : 'disappeared'}";
 }
