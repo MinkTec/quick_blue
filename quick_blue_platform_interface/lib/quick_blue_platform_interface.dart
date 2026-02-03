@@ -161,4 +161,10 @@ abstract class QuickBluePlatform extends PlatformInterface {
 
   /// Clears the automatic BLE write command.
   Future<void> clearAutoBleCommandOnAppear();
+
+  /// Android only: shuts down the headless background FlutterEngine used by
+  /// the CompanionDeviceService.
+  ///
+  /// Safe to call even when no background engine is running.
+  Future<void> shutdownBackgroundEngine();
 }

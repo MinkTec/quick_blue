@@ -287,6 +287,11 @@ class QuickBlueLinux extends QuickBluePlatform {
   Future<void> clearAutoBleCommandOnAppear() async {
     _log("auto BLE command is not supported on Linux");
   }
+
+  @override
+  Future<void> shutdownBackgroundEngine() async {
+    // Not supported on Linux.
+  }
 }
 
 extension BlueZDeviceExtension on BlueZDevice {

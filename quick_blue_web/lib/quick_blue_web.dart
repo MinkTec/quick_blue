@@ -244,4 +244,9 @@ class QuickBlueWeb extends QuickBluePlatform {
   Future<void> clearAutoBleCommandOnAppear() async {
     throw UnimplementedError("auto BLE command is not supported on Web");
   }
+
+  @override
+  Future<void> shutdownBackgroundEngine() async {
+    // Not supported on web.
+  }
 }

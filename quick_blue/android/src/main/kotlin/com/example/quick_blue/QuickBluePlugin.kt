@@ -295,6 +295,20 @@ class QuickBluePlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamHand
       "clearAutoBleCommandOnAppear" -> {
         handleClearAutoBleCommandOnAppear(result)
       }
+      "shutdownBackgroundEngine" -> {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+          try {
+            CompanionPresenceService.shutdownBackgroundEngine()
+            result.success(null)
+          } catch (e: Exception) {
+            Log.e(TAG, "Error shutting down background engine", e)
+            result.error("SHUTDOWN_ERROR", e.message, null)
+          }
+        } else {
+          // No background engine exists below API 31.
+          result.success(null)
+        }
+      }
       
       else -> {
         result.notImplemented()

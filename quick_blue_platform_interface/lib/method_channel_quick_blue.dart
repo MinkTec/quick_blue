@@ -418,4 +418,13 @@ class MethodChannelQuickBlue extends QuickBluePlatform {
     await _method.invokeMethod('clearAutoBleCommandOnAppear');
     _log('clearAutoBleCommandOnAppear invokeMethod success');
   }
+
+  @override
+  Future<void> shutdownBackgroundEngine() async {
+    if (!Platform.isAndroid) {
+      return;
+    }
+    await _method.invokeMethod('shutdownBackgroundEngine');
+    _log('shutdownBackgroundEngine invokeMethod success');
+  }
 }

@@ -65,6 +65,39 @@ class CompanionPresenceService : CompanionDeviceService() {
         // Deduplicate rapid duplicate events from CDM
         private var sLastEventKey: String? = null
         private var sLastEventTimestamp: Long = 0L
+
+        /**
+         * Shuts down the background FlutterEngine if it exists.
+         *
+         * This should be called when the foreground app starts to ensure
+         * a clean handoff between foreground and background operation.
+         */
+        fun shutdownBackgroundEngine() {
+            synchronized(sEngineLock) {
+                val engine = sBackgroundFlutterEngine
+                if (engine == null) {
+                    Log.d(TAG, "No background FlutterEngine to shut down")
+                    return
+                }
+
+                Log.d(TAG, "Shutting down background FlutterEngine")
+                try {
+                    engine.destroy()
+                } catch (e: Exception) {
+                    Log.w(TAG, "Error destroying background engine", e)
+                }
+
+                sBackgroundFlutterEngine = null
+                sBackgroundIsolateReady.set(false)
+                sBackgroundIsolateReadyLatch = null
+                synchronized(sPendingEvents) {
+                    sPendingEvents.clear()
+                }
+                sLastEventKey = null
+                sLastEventTimestamp = 0L
+                Log.d(TAG, "Background FlutterEngine shut down successfully")
+            }
+        }
     }
 
     private var backgroundChannel: MethodChannel? = null

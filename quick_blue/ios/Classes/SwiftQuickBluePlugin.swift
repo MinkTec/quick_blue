@@ -21,9 +21,7 @@ extension CBUUID {
 extension CBPeripheral {
   // FIXME https://forums.developer.apple.com/thread/84375
   public var uuid: UUID {
-    get {
-      value(forKey: "identifier") as! NSUUID as UUID
-    }
+    identifier
   }
 
   public func getCharacteristic(_ characteristic: String, of service: String) -> CBCharacteristic? {
@@ -54,14 +52,29 @@ public class SwiftQuickBluePlugin: NSObject, FlutterPlugin {
     eventScanResult.setStreamHandler(instance)
     instance.messageConnector = messageConnector
     instance.backgroundChannel = backgroundChannel
+    backgroundChannel.setMethodCallHandler { call, result in
+      switch call.method {
+      case "backgroundIsolateReady":
+        instance.backgroundChannelReady = true
+        instance.flushPendingBackgroundEvents()
+        instance.flushPendingFlutterMessages()
+        result(nil)
+      default:
+        result(FlutterMethodNotImplemented)
+      }
+    }
   }
     
   private var manager: CBCentralManager!
   private var discoveredPeripherals: Dictionary<String, CBPeripheral>!
+  private let peripheralsQueue = DispatchQueue(label: "quick_blue.peripherals")
 
   private var scanResultSink: FlutterEventSink?
   private var messageConnector: FlutterBasicMessageChannel!
   private var backgroundChannel: FlutterMethodChannel!
+  private var backgroundChannelReady = false
+  private var pendingBackgroundEvents: [[String: Any]] = []
+  private var pendingFlutterMessages: [[String: Any]] = []
 
   override init() {
     super.init()
@@ -77,7 +90,7 @@ public class SwiftQuickBluePlugin: NSObject, FlutterPlugin {
       CBCentralManagerOptionShowPowerAlertKey: true
     ]
     let queue = DispatchQueue(label: "quick_blue.bluetooth", qos: .utility)
-    manager = CBCentralManager(delegate: self, queue: queue)
+    manager = CBCentralManager(delegate: self, queue: queue, options: options)
   }
   
   // MARK: - State Restoration Helper Methods
@@ -107,7 +120,7 @@ public class SwiftQuickBluePlugin: NSObject, FlutterPlugin {
     let peripherals = manager.retrievePeripherals(withIdentifiers: identifiers)
     
     for peripheral in peripherals {
-      discoveredPeripherals[peripheral.uuid.uuidString] = peripheral
+      setDiscoveredPeripheral(peripheral)
       peripheral.delegate = self
       
       // Issue pending connection
@@ -122,9 +135,30 @@ public class SwiftQuickBluePlugin: NSObject, FlutterPlugin {
     }
   }
 
+  private func setDiscoveredPeripheral(_ peripheral: CBPeripheral) {
+    peripheralsQueue.sync {
+      discoveredPeripherals[peripheral.uuid.uuidString] = peripheral
+    }
+  }
+
+  private func getDiscoveredPeripheral(_ deviceId: String) -> CBPeripheral? {
+    peripheralsQueue.sync {
+      discoveredPeripherals[deviceId]
+    }
+  }
+
+  private func hasTrackedPeripheral(_ uuid: String) -> Bool {
+    let uuids = UserDefaults.standard.array(forKey: kConnectedPeripheralUUIDs) as? [String] ?? []
+    return uuids.contains(uuid)
+  }
+
   private func sendFlutterMessage(_ message: [String: Any]) {
     DispatchQueue.main.async {
-      self.messageConnector.sendMessage(message)
+      if self.backgroundCallbackHandle != nil && !self.backgroundChannelReady {
+        self.pendingFlutterMessages.append(message)
+      } else {
+        self.messageConnector.sendMessage(message)
+      }
     }
   }
   
@@ -140,7 +174,7 @@ public class SwiftQuickBluePlugin: NSObject, FlutterPlugin {
 
     for peripheral in peripherals {
       NSLog("peripheral: \(peripheral.name) \(peripheral.uuid.uuidString)");
-      discoveredPeripherals[peripheral.uuid.uuidString] = peripheral
+      setDiscoveredPeripheral(peripheral)
     }
   }
   
@@ -148,7 +182,7 @@ public class SwiftQuickBluePlugin: NSObject, FlutterPlugin {
       if discoveredPeripherals.isEmpty {
         repopulateDiscoveredPeripherals();
       }
-		  guard let peripheral = discoveredPeripherals[deviceId] else {
+		  guard let peripheral = getDiscoveredPeripheral(deviceId) else {
         NSLog("failed to find id");
 			  result(FlutterError(code: "IllegalArgument", message: "Unknown deviceId:\(deviceId)", details: nil))
 			  return nil;
@@ -163,15 +197,42 @@ public class SwiftQuickBluePlugin: NSObject, FlutterPlugin {
   
   private func invokeBackgroundWakeCallback(deviceId: String, deviceName: String?, wakeType: String) {
     let timestamp = Int(Date().timeIntervalSince1970 * 1000)
-    
+    let payload: [String: Any] = [
+      "deviceId": deviceId,
+      "deviceName": deviceName as Any,
+      "wakeType": wakeType,
+      "associationId": nil as Int?,
+      "timestamp": timestamp
+    ]
+
     DispatchQueue.main.async {
-      self.backgroundChannel.invokeMethod("onPresenceEvent", arguments: [
-        "deviceId": deviceId,
-        "deviceName": deviceName as Any,
-        "wakeType": wakeType,
-        "associationId": nil as Int?,
-        "timestamp": timestamp
-      ])
+      if self.backgroundChannelReady {
+        self.backgroundChannel.invokeMethod("onPresenceEvent", arguments: payload)
+      } else {
+        self.pendingBackgroundEvents.append(payload)
+      }
+    }
+  }
+
+  private func flushPendingBackgroundEvents() {
+    guard backgroundChannelReady, !pendingBackgroundEvents.isEmpty else {
+      return
+    }
+    let events = pendingBackgroundEvents
+    pendingBackgroundEvents.removeAll()
+    for payload in events {
+      backgroundChannel.invokeMethod("onPresenceEvent", arguments: payload)
+    }
+  }
+
+  private func flushPendingFlutterMessages() {
+    guard backgroundChannelReady, !pendingFlutterMessages.isEmpty else {
+      return
+    }
+    let messages = pendingFlutterMessages
+    pendingFlutterMessages.removeAll()
+    for payload in messages {
+      messageConnector.sendMessage(payload)
     }
   }
   
@@ -445,7 +506,7 @@ extension SwiftQuickBluePlugin: CBCentralManagerDelegate {
 
   public func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral, advertisementData: [String: Any], rssi RSSI: NSNumber) {
     print("centralManager:didDiscoverPeripheral \(peripheral.name) \(peripheral.uuid.uuidString)")
-    discoveredPeripherals[peripheral.uuid.uuidString] = peripheral
+    setDiscoveredPeripheral(peripheral)
 
     let manufacturerData = advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data
     scanResultSink?([
@@ -458,21 +519,44 @@ extension SwiftQuickBluePlugin: CBCentralManagerDelegate {
 
   public func centralManager(_ central: CBCentralManager, willRestoreState dict: [String: Any]) {
     print("centralManager:willRestoreState")
+
+    // Resynchronize state immediately after restoration
+    centralManagerDidUpdateState(central)
     
     // Extract restored peripherals from system
     if let peripherals = dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral] {
       var restoredUUIDs: [String] = []
-      
+
       for peripheral in peripherals {
-        discoveredPeripherals[peripheral.uuid.uuidString] = peripheral
+        setDiscoveredPeripheral(peripheral)
         peripheral.delegate = self
         restoredUUIDs.append(peripheral.uuid.uuidString)
-        
+
         // Re-issue connect for pending connection behavior
         if peripheral.state != .connected {
           manager.connect(peripheral, options: [
             CBConnectPeripheralOptionNotifyOnConnectionKey: true
           ])
+        } else {
+          // Rehydrate state for already connected peripherals
+          centralManager(central, didConnect: peripheral)
+
+          if let services = peripheral.services, !services.isEmpty {
+            self.peripheral(peripheral, didDiscoverServices: nil)
+
+            for service in services {
+              if let characteristics = service.characteristics, !characteristics.isEmpty {
+                self.peripheral(peripheral, didDiscoverCharacteristicsFor: service, error: nil)
+                for characteristic in characteristics where characteristic.isNotifying {
+                  self.peripheral(peripheral, didUpdateNotificationStateFor: characteristic, error: nil)
+                }
+              } else {
+                peripheral.discoverCharacteristics(nil, for: service)
+              }
+            }
+          } else {
+            peripheral.discoverServices(nil)
+          }
         }
       }
       
@@ -508,11 +592,13 @@ extension SwiftQuickBluePlugin: CBCentralManagerDelegate {
       "ConnectionState": "disconnected",
     ])
     
-    // CRITICAL: Re-arm the pending connection for infinite connection loop
-    // This ensures the OS continues looking for the device even when out of range
-    manager.connect(peripheral, options: [
-      CBConnectPeripheralOptionNotifyOnConnectionKey: true
-    ])
+    if hasTrackedPeripheral(peripheral.uuid.uuidString) {
+      // CRITICAL: Re-arm the pending connection for infinite connection loop
+      // This ensures the OS continues looking for the device even when out of range
+      manager.connect(peripheral, options: [
+        CBConnectPeripheralOptionNotifyOnConnectionKey: true
+      ])
+    }
   }
 }
 
@@ -586,6 +672,17 @@ extension SwiftQuickBluePlugin: CBPeripheralDelegate {
         "characteristic": characteristic.uuid.uuidStr,
         "value": FlutterStandardTypedData(bytes: characteristic.value!)
       ]
+    ])
+  }
+
+  public func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic, error: Error?) {
+    guard characteristic.isNotifying else {
+      return
+    }
+    sendFlutterMessage([
+      "type": "characteristicChanged",
+      "deviceId": peripheral.uuid.uuidString,
+      "characteristic": characteristic.uuid.uuidStr
     ])
   }
 }

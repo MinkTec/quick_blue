@@ -169,9 +169,13 @@ class QuickBlue {
   /// }
   /// ```
   static Future<void> initializeBackgroundWakeCallback(
-      BackgroundWakeCallback callback) {
+      BackgroundWakeCallback callback) async {
     background_dispatcher.QuickBlueBackgroundCallbackDispatcher
         .setCallbackHandler(callback);
+
+    if (Platform.isIOS) {
+      await background_dispatcher.notifyBackgroundIsolateReady();
+    }
 
     final callbackHandle =
         background_dispatcher.QuickBlueBackgroundCallbackDispatcher
@@ -187,7 +191,7 @@ class QuickBlue {
         background_dispatcher.QuickBlueBackgroundCallbackDispatcher
             .dispatcherHandle;
 
-    return _platform.registerBackgroundWakeCallback(
+    await _platform.registerBackgroundWakeCallback(
         dispatcherHandle, callbackHandle);
   }
 
@@ -365,4 +369,9 @@ class QuickBlue {
   /// ```
   static Future<void> clearAutoBleCommandOnAppear() =>
       _platform.clearAutoBleCommandOnAppear();
+
+  /// Android only: shuts down the headless background FlutterEngine used for
+  /// companion presence.
+  static Future<void> shutdownBackgroundEngine() =>
+      _platform.shutdownBackgroundEngine();
 }

@@ -48,6 +48,11 @@ void dispatchBackgroundWakeEvent(BackgroundWakeEvent event) {
   _backgroundWakeCallbackHandler?.call(event);
 }
 
+Future<void> notifyBackgroundIsolateReady() async {
+  _initializeBackgroundChannel();
+  await _backgroundChannel.invokeMethod<void>('backgroundIsolateReady');
+}
+
 /// Background callback dispatcher for wake events.
 ///
 /// This is invoked by Android when starting the headless engine.
