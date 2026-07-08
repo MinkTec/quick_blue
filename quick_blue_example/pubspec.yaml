@@ -15,8 +15,8 @@ dependencies:
 
   quick_blue:
     git:
-      url: https://github.com/MinkTec/quick_blue
-      ref: HEAD
+      url: ssh://git@github.com/MinkTec/quick_blue.git
+      ref: master
       path: quick_blue
   cupertino_icons: ^1.0.0
   convert: ^3.0.0

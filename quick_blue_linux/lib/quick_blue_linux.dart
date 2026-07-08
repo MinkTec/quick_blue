@@ -8,25 +8,36 @@ import 'package:quick_blue_platform_interface/ble_events.dart';
 import 'package:quick_blue_platform_interface/quick_blue_platform_interface.dart';
 
 class QuickBlueLinux extends QuickBluePlatform {
+  static const _connectionTimeout = Duration(seconds: 5);
+  static const _servicesResolvedTimeout = Duration(seconds: 4);
+
   bool isInitialized = false;
 
   final BlueZClient _client = BlueZClient();
 
-  bool _valueReadTriggerActive = false;
-
   BlueZAdapter? _activeAdapter;
+  String? _scanServiceId;
+
+  final _connectionStates = <String, BlueConnectionState>{};
+  final _deviceSubscriptions = <String, StreamSubscription<List<String>>>{};
+  final _notifySubscriptions = <String, StreamSubscription<List<String>>>{};
+  final _eventMessageController = StreamController<BleEventMessage>.broadcast();
 
   Future<void> _ensureInitialized() async {
     if (!isInitialized) {
       await _client.connect();
 
-      _activeAdapter ??=
-          _client.adapters.firstWhereOrNull((adapter) => adapter.powered);
+      _refreshActiveAdapter();
 
       _client.deviceAdded.listen(_onDeviceAdd);
 
       isInitialized = true;
     }
+  }
+
+  void _refreshActiveAdapter() {
+    _activeAdapter =
+        _client.adapters.firstWhereOrNull((adapter) => adapter.powered);
   }
 
   QuickLogger? _logger;
@@ -43,6 +54,7 @@ class QuickBlueLinux extends QuickBluePlatform {
   @override
   Future<bool> isBluetoothAvailable() async {
     await _ensureInitialized();
+    _refreshActiveAdapter();
     _log('isBluetoothAvailable invoke success');
 
     return _activeAdapter != null;
@@ -54,28 +66,47 @@ class QuickBlueLinux extends QuickBluePlatform {
   @override
   void startScan({String? serviceId}) async {
     await _ensureInitialized();
+    _refreshActiveAdapter();
+    final adapter = _activeAdapter;
+    if (adapter == null) {
+      _log('startScan failed: no powered Bluetooth adapter',
+          logLevel: Level.WARNING);
+      return;
+    }
+
+    _scanServiceId = serviceId;
     _log('startScan invoke success');
 
     try {
-      await _activeAdapter!.startDiscovery();
+      await adapter.setDiscoveryFilter(
+        transport: 'le',
+        duplicateData: true,
+      );
+      await adapter.startDiscovery();
     } catch (e) {
       _log('scan was already running');
       if (!e.toString().contains("org.bluez.Error.InProgress")) {
         rethrow;
       }
     }
-    _client.devices.where((d) => d.rssi < 0).forEach(_onDeviceAdd);
+    _client.devices
+        .where((d) => _matchesScanService(d, serviceId))
+        .forEach(_onDeviceAdd);
   }
 
   @override
   void stopScan() async {
     await _ensureInitialized();
+    final adapter = _activeAdapter;
     _log('stopScan invoke success');
 
     try {
-      await _activeAdapter!.stopDiscovery();
+      await adapter?.stopDiscovery();
+      await adapter?.setDiscoveryFilter();
     } catch (e) {
       _log("no scan was running");
+    } finally {
+      _scanServiceId = null;
     }
   }
 
@@ -89,44 +120,184 @@ class QuickBlueLinux extends QuickBluePlatform {
   @override
   Stream get scanResultStream => _scanResultController.stream;
 
-  void _onDeviceAdd(BlueZDevice device) => _scanResultController.add({
-        'deviceId': device.address,
-        'name': device.alias,
-        'manufacturerDataHead': device.manufacturerDataHead,
-        'rssi': device.rssi,
-      });
+  void _onDeviceAdd(BlueZDevice device) {
+    _watchDevice(device);
+    if (!_matchesScanService(device, _scanServiceId)) return;
+    _emitScanResult(device);
+  }
+
+  void _emitScanResult(BlueZDevice device) {
+    _scanResultController.add({
+      'deviceId': device.address,
+      'name': device.alias.isNotEmpty ? device.alias : device.name,
+      'manufacturerDataHead': device.manufacturerDataHead,
+      'rssi': device.rssi,
+    });
+  }
+
+  bool _matchesScanService(BlueZDevice device, String? serviceId) {
+    if (serviceId == null) return true;
+    final normalizedServiceId = _normalizeUuid(serviceId);
+    final advertised = device.uuids
+        .map((uuid) => _normalizeUuid(uuid.toString()))
+        .contains(normalizedServiceId);
+    if (advertised) return true;
+
+    return device.gattServices
+        .map((service) => _normalizeUuid(service.uuid.toString()))
+        .contains(normalizedServiceId);
+  }
+
+  String _normalizeUuid(String value) =>
+      value.toLowerCase().replaceAll('-', '');
+
+  void _watchDevice(BlueZDevice device) {
+    final deviceId = device.address;
+    if (_deviceSubscriptions.containsKey(deviceId)) return;
+    _deviceSubscriptions[deviceId] =
+        device.propertiesChanged.listen((properties) {
+      if (properties.contains('Connected')) {
+        if (device.connected) {
+          _emitConnectionState(deviceId, BlueConnectionState.connected);
+        } else {
+          _cancelNotifySubscriptions(deviceId);
+          _emitConnectionState(deviceId, BlueConnectionState.disconnected);
+        }
+      }
+
+      if (_scanServiceId != null &&
+          properties.any(_isScanRelevantProperty) &&
+          _matchesScanService(device, _scanServiceId)) {
+        _emitScanResult(device);
+      }
+    });
+  }
+
+  bool _isScanRelevantProperty(String property) =>
+      property == 'UUIDs' ||
+      property == 'RSSI' ||
+      property == 'ManufacturerData' ||
+      property == 'Name' ||
+      property == 'Alias';
+
+  void _emitConnectionState(String deviceId, BlueConnectionState state) {
+    if (_connectionStates[deviceId] == state) return;
+    _connectionStates[deviceId] = state;
+    onConnectionChanged?.call(deviceId, state);
+    _eventMessageController.add(
+      (state == BlueConnectionState.connected
+              ? BleEvent.connected
+              : BleEvent.disconnected)
+          .package({'type': state.value, 'deviceId': deviceId}),
+    );
+  }
+
+  Future<bool> _waitForConnected(BlueZDevice device) async {
+    if (device.connected) return true;
+    try {
+      await device.propertiesChanged
+          .where((properties) => properties.contains('Connected'))
+          .firstWhere((_) => device.connected)
+          .timeout(_connectionTimeout);
+    } on TimeoutException {
+      return false;
+    }
+    return true;
+  }
+
+  Future<bool> _waitForServicesResolved(BlueZDevice device) async {
+    if (device.servicesResolved) return true;
+    try {
+      await device.propertiesChanged
+          .where((properties) => properties.contains('ServicesResolved'))
+          .firstWhere((_) => device.servicesResolved)
+          .timeout(_servicesResolvedTimeout);
+    } on TimeoutException {
+      return false;
+    }
+    return true;
+  }
 
   @override
   Future<void> connect(String deviceId, {bool? auto}) async {
-    try {
-      final connect = _device(deviceId)?.connect();
+    await _ensureInitialized();
+    final device = _device(deviceId);
+    if (device == null) {
+      _log('connect failed: unknown deviceId $deviceId',
+          logLevel: Level.WARNING);
+      _emitConnectionState(deviceId, BlueConnectionState.disconnected);
+      return;
+    }
 
-      connect?.whenComplete(() {
-        if (onConnectionChanged != null) {
-          onConnectionChanged!(deviceId, BlueConnectionState.connected);
-        }
-      });
+    _watchDevice(device);
+
+    try {
+      try {
+        await _activeAdapter?.stopDiscovery();
+      } catch (_) {}
+
+      if (!device.connected) {
+        await device.connect().timeout(_connectionTimeout);
+      }
+
+      if (!await _waitForConnected(device)) {
+        _log('connect timed out for $deviceId', logLevel: Level.WARNING);
+        _emitConnectionState(deviceId, BlueConnectionState.disconnected);
+        return;
+      }
+
+      final servicesResolved = await _waitForServicesResolved(device);
+      if (!servicesResolved && device.gattServices.isEmpty) {
+        _log('services were not resolved for $deviceId',
+            logLevel: Level.WARNING);
+        _emitConnectionState(deviceId, BlueConnectionState.disconnected);
+        return;
+      }
+
+      _emitConnectionState(deviceId, BlueConnectionState.connected);
+    } on BlueZAlreadyConnectedException {
+      await _waitForServicesResolved(device);
+      _emitConnectionState(deviceId, BlueConnectionState.connected);
     } catch (e) {
-      print("quick_blue: ${e}");
+      _log('connect failed for $deviceId: $e', logLevel: Level.WARNING);
+      _emitConnectionState(deviceId, BlueConnectionState.disconnected);
     }
   }
 
   @override
   Future<void> disconnect(String deviceId) async {
-    return _device(deviceId)?.disconnect().whenComplete(() {
-      if (onConnectionChanged != null) {
-        onConnectionChanged!(deviceId, BlueConnectionState.disconnected);
+    await _ensureInitialized();
+    _cancelNotifySubscriptions(deviceId);
+    try {
+      final device = _device(deviceId);
+      if (device != null && device.connected) {
+        await device.disconnect();
       }
-    });
+    } finally {
+      _emitConnectionState(deviceId, BlueConnectionState.disconnected);
+    }
   }
 
   @override
-  void discoverServices(String deviceId) {
+  void discoverServices(String deviceId) async {
+    await _ensureInitialized();
     if (onServiceDiscovered == null) return;
-    _device(deviceId)!.gattServices.forEach((e) {
-      onServiceDiscovered!(deviceId, e.uuid.toString(),
-          e.characteristics.map((e) => e.uuid.toString()).toList());
-    });
+    final device = _device(deviceId);
+    if (device == null) return;
+    await _waitForServicesResolved(device);
+    for (final service in device.gattServices) {
+      final serviceId = service.uuid.toString();
+      final characteristicIds = service.characteristics
+          .map((characteristic) => characteristic.uuid.toString())
+          .toList();
+      onServiceDiscovered!(deviceId, serviceId, characteristicIds);
+      _eventMessageController.add(BleEvent.serviceDiscovered.package({
+        'type': BleEvent.serviceDiscovered.name,
+        'deviceId': deviceId,
+        'service': serviceId,
+        'characteristics': characteristicIds,
+      }));
+    }
   }
 
   BlueZGattCharacteristic? _findService(
@@ -141,36 +312,45 @@ class QuickBlueLinux extends QuickBluePlatform {
   @override
   Future<void> setNotifiable(String deviceId, String service,
       String characteristic, BleInputProperty bleInputProperty) async {
-    await _findService(deviceId, service, characteristic)!.startNotify();
-    _initManualRead(deviceId, service, characteristic);
-    /*
-    _client.devices
-        .firstWhere((e) => e.address == deviceId)
-        .gattServices
-        .firstWhereOrNull((e) => e == service)
-        ?.characteristics
-        .firstWhereOrNull((e) => e == characteristic)
-        ?.acquireNotify()
-        .then((v) => v.socket.forEach((event) {
-              if (event == RawSocketEvent.read)
-                onValueChanged?.call(service, characteristic, v.socket.read()!);
-            }));
-        */
+    final char = _findService(deviceId, service, characteristic);
+    if (char == null) {
+      throw ArgumentError(
+          'Unknown characteristic $service/$characteristic on $deviceId');
+    }
+
+    final key = _notifyKey(deviceId, service, characteristic);
+    await _notifySubscriptions.remove(key)?.cancel();
+
+    if (bleInputProperty == BleInputProperty.disabled) {
+      if (char.notifying) {
+        await char.stopNotify();
+      }
+      return;
+    }
+
+    _notifySubscriptions[key] = char.propertiesChanged.listen((properties) {
+      if (!properties.contains('Value')) return;
+      onValueChanged?.call(
+        deviceId,
+        characteristic,
+        Uint8List.fromList(char.value),
+      );
+    });
+
+    if (!char.notifying) {
+      await char.startNotify();
+    }
   }
 
-  _initManualRead(
-      String deviceId, String service, String characteristic) async {
-    if (_valueReadTriggerActive) return;
-    _valueReadTriggerActive = true;
-    while (true) {
-      try {
-        await readValue(deviceId, service, characteristic);
-      } catch (e) {
-        if (e.toString().contains("org.bluez.Error.Failed: Not connected")) {
-          _valueReadTriggerActive = false;
-          return;
-        }
-      }
+  String _notifyKey(String deviceId, String service, String characteristic) =>
+      '$deviceId|$service|$characteristic';
+
+  void _cancelNotifySubscriptions(String deviceId) {
+    final keys = _notifySubscriptions.keys
+        .where((key) => key.startsWith('$deviceId|'))
+        .toList();
+    for (final key in keys) {
+      _notifySubscriptions.remove(key)?.cancel();
     }
   }
 
@@ -178,7 +358,7 @@ class QuickBlueLinux extends QuickBluePlatform {
   Future<void> readValue(
           String deviceId, String service, String characteristic) async =>
       onValueChanged?.call(
-          service,
+          deviceId,
           characteristic,
           Uint8List.fromList(
               await _findService(deviceId, service, characteristic)!
@@ -202,7 +382,14 @@ class QuickBlueLinux extends QuickBluePlatform {
 
   @override
   Future<void> readRssi(String deviceId) async {
-    onRssiRead?.call(deviceId, _device(deviceId)!.rssi);
+    final device = _device(deviceId);
+    if (device == null) return;
+    onRssiRead?.call(deviceId, device.rssi);
+    _eventMessageController.add(BleEvent.rssiRead.package({
+      'type': BleEvent.rssiRead.name,
+      'deviceId': deviceId,
+      'rssi': device.rssi,
+    }));
   }
 
   @override
@@ -211,7 +398,7 @@ class QuickBlueLinux extends QuickBluePlatform {
   }
 
   @override
-  Stream<BleEventMessage> get bleEventStream => throw UnimplementedError();
+  Stream<BleEventMessage> get bleEventStream => _eventMessageController.stream;
 }
 
 extension BlueZDeviceExtension on BlueZDevice {
@@ -220,7 +407,12 @@ extension BlueZDeviceExtension on BlueZDevice {
 
     final sorted = manufacturerData.entries.toList()
       ..sort((a, b) => a.key.id - b.key.id);
-    return Uint8List.fromList(sorted.first.value);
+    final first = sorted.first;
+    return Uint8List.fromList([
+      first.key.id & 0xff,
+      (first.key.id >> 8) & 0xff,
+      ...first.value,
+    ]);
   }
 }
 
