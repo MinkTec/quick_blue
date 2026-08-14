@@ -1,5 +1,6 @@
 library quick_blue_platform_interface;
 
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:logging/logging.dart';
@@ -41,6 +42,11 @@ abstract class QuickBluePlatform extends PlatformInterface {
   void setLogger(QuickLogger logger);
 
   Future<bool> isBluetoothAvailable();
+
+  /// Emits when the Bluetooth adapter becomes available or unavailable.
+  ///
+  /// Platforms without native availability notifications emit no events.
+  Stream<bool> get bluetoothAvailabilityStream => const Stream.empty();
 
   void reinit();
 

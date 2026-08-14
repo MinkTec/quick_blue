@@ -6,7 +6,10 @@ import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -47,9 +50,19 @@ class QuickBluePlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamHand
     context = flutterPluginBinding.applicationContext
     mainThreadHandler = Handler(Looper.getMainLooper())
     bluetoothManager = flutterPluginBinding.applicationContext.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
+    context.registerReceiver(
+      bluetoothStateReceiver,
+      IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED)
+    )
+    bluetoothStateReceiverRegistered = true
   }
 
   override fun onDetachedFromEngine(@NonNull binding: FlutterPlugin.FlutterPluginBinding) {
+    if (bluetoothStateReceiverRegistered) {
+      context.unregisterReceiver(bluetoothStateReceiver)
+      bluetoothStateReceiverRegistered = false
+    }
+
     bluetoothManager.adapter.bluetoothLeScanner?.stopScan(scanCallback)
 
     eventScanResult.setStreamHandler(null)
@@ -60,6 +73,18 @@ class QuickBluePlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamHand
   private lateinit var mainThreadHandler: Handler
   private lateinit var bluetoothManager: BluetoothManager
   private lateinit var pluginBinding: FlutterPlugin.FlutterPluginBinding
+  private var bluetoothStateReceiverRegistered = false
+
+  private val bluetoothStateReceiver = object : BroadcastReceiver() {
+    override fun onReceive(context: Context?, intent: Intent?) {
+      if (intent?.action != BluetoothAdapter.ACTION_STATE_CHANGED) return
+
+      when (intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)) {
+        BluetoothAdapter.STATE_ON -> sendBluetoothAvailability(true)
+        BluetoothAdapter.STATE_OFF -> sendBluetoothAvailability(false)
+      }
+    }
+  }
 
 
   private val knownGatts = mutableListOf<BluetoothGatt>()
@@ -69,6 +94,13 @@ class QuickBluePlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamHand
 
   private fun sendMessage(messageChannel: BasicMessageChannel<Any>, message: Map<String, Any>) {
     mainThreadHandler.post { messageChannel.send(message) }
+  }
+
+  private fun sendBluetoothAvailability(available: Boolean) {
+    sendMessage(messageConnector, mapOf(
+      "type" to "bluetoothAvailabilityChanged",
+      "available" to available
+    ))
   }
 
   override fun onMethodCall(@NonNull call: MethodCall, @NonNull result: Result) {

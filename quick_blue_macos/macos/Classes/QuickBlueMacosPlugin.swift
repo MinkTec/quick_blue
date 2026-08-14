@@ -183,6 +183,10 @@ public class QuickBlueMacosPlugin: NSObject, FlutterPlugin {
 extension QuickBlueMacosPlugin: CBCentralManagerDelegate {
   public func centralManagerDidUpdateState(_ central: CBCentralManager) {
     print("centralManagerDidUpdateState \(central.state.rawValue)")
+    messageConnector?.sendMessage([
+      "type": "bluetoothAvailabilityChanged",
+      "available": central.state == .poweredOn,
+    ])
   }
 
   public func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral, advertisementData: [String: Any], rssi RSSI: NSNumber) {

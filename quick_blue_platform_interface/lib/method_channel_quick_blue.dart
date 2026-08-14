@@ -36,6 +36,12 @@ class MethodChannelQuickBlue extends QuickBluePlatform {
     return result;
   }
 
+  final _bluetoothAvailabilityController = StreamController<bool>.broadcast();
+
+  @override
+  Stream<bool> get bluetoothAvailabilityStream =>
+      _bluetoothAvailabilityController.stream;
+
   @override
   Future<void> startScan({String? serviceId}) {
     return _method.invokeMethod('startScan', {
@@ -120,6 +126,8 @@ class MethodChannelQuickBlue extends QuickBluePlatform {
       onRssiRead?.call(message['deviceId'], message["rssi"]);
     } else if (message['type'] == "repopulatePeripherals") {
       print(message);
+    } else if (message['type'] == 'bluetoothAvailabilityChanged') {
+      _bluetoothAvailabilityController.add(message['available'] as bool);
     } else if (message['type'] != null) {
       _eventMessageController
           .add(BleEvent.parse(message["type"]).package(message));

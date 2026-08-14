@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:quick_blue_linux/quick_blue_linux.dart';
@@ -48,6 +47,11 @@ class QuickBlue {
 
   static Future<bool> isBluetoothAvailable() =>
       _platform.isBluetoothAvailable();
+
+  /// Emits when the operating system reports that Bluetooth availability
+  /// changed. Call [isBluetoothAvailable] when the current value is needed.
+  static Stream<bool> get bluetoothAvailabilityStream =>
+      _platform.bluetoothAvailabilityStream.distinct();
 
   static reinit() => _platform.reinit();
 
