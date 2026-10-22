@@ -10,10 +10,13 @@ import 'quick_blue_platform_interface.dart';
 
 class MethodChannelQuickBlue extends QuickBluePlatform {
   static const MethodChannel _method = const MethodChannel('quick_blue/method');
-  static const _event_scanResult =
-      const EventChannel('quick_blue/event.scanResult');
+  static const _event_scanResult = const EventChannel(
+    'quick_blue/event.scanResult',
+  );
   static const _message_connector = const BasicMessageChannel(
-      'quick_blue/message.connector', StandardMessageCodec());
+    'quick_blue/message.connector',
+    StandardMessageCodec(),
+  );
 
   MethodChannelQuickBlue() {
     _message_connector.setMessageHandler(_handleConnectorMessage);
@@ -44,11 +47,12 @@ class MethodChannelQuickBlue extends QuickBluePlatform {
 
   @override
   Future<void> startScan({String? serviceId}) {
-    return _method.invokeMethod('startScan', {
-      'serviceId': serviceId,
-    }).onError((error, stackTrace) {
-      _log('stopScan invocation failed with $error');
-    }).then((_) => _log('startScan invokeMethod success'));
+    return _method
+        .invokeMethod('startScan', {'serviceId': serviceId})
+        .onError((error, stackTrace) {
+          _log('stopScan invocation failed with $error');
+        })
+        .then((_) => _log('startScan invokeMethod success'));
   }
 
   @override
@@ -58,8 +62,9 @@ class MethodChannelQuickBlue extends QuickBluePlatform {
         .then((_) => print('stopScan invokeMethod success'));
   }
 
-  Stream<dynamic> scanResultStream =
-      _event_scanResult.receiveBroadcastStream({'name': 'scanResult'});
+  Stream<dynamic> scanResultStream = _event_scanResult.receiveBroadcastStream({
+    'name': 'scanResult',
+  });
 
   StreamController<BleEventMessage> _eventMessageController =
       StreamController.broadcast();
@@ -69,48 +74,49 @@ class MethodChannelQuickBlue extends QuickBluePlatform {
   @override
   Future<void> connect(String deviceId, {bool? auto}) {
     if (Platform.isAndroid && auto != null && auto) {
-      return _method.invokeMethod('autoConnect', {
-        'deviceId': deviceId,
-      }).then((_) => _log('connect invokeMethod success'));
+      return _method
+          .invokeMethod('autoConnect', {'deviceId': deviceId})
+          .then((_) => _log('connect invokeMethod success'));
     } else {
-      return _method.invokeMethod('connect', {
-        'deviceId': deviceId,
-      }).then((_) => _log('connect invokeMethod success'));
+      return _method
+          .invokeMethod('connect', {'deviceId': deviceId})
+          .then((_) => _log('connect invokeMethod success'));
     }
   }
 
   void autoConnect(String deviceId) {
-    _method.invokeMethod('autoConnect', {
-      'deviceId': deviceId,
-    }).then((_) => _log('connect invokeMethod success'));
+    _method
+        .invokeMethod('autoConnect', {'deviceId': deviceId})
+        .then((_) => _log('connect invokeMethod success'));
   }
 
   @override
   Future<void> disconnect(String deviceId) {
-    return _method.invokeMethod('disconnect', {
-      'deviceId': deviceId,
-    }).then((_) => _log('disconnect invokeMethod success'));
+    return _method
+        .invokeMethod('disconnect', {'deviceId': deviceId})
+        .then((_) => _log('disconnect invokeMethod success'));
   }
 
   @override
   void discoverServices(String deviceId) {
-    _method.invokeMethod('discoverServices', {
-      'deviceId': deviceId,
-    }).then((_) => _log('discoverServices invokeMethod success'));
+    _method
+        .invokeMethod('discoverServices', {'deviceId': deviceId})
+        .then((_) => _log('discoverServices invokeMethod success'));
   }
 
   Future<void> _handleConnectorMessage(dynamic message) async {
     if (message['ConnectionState'] != null) {
       String deviceId = message['deviceId'];
-      BlueConnectionState connectionState =
-          BlueConnectionState.parse(message['ConnectionState']);
+      BlueConnectionState connectionState = BlueConnectionState.parse(
+        message['ConnectionState'],
+      );
       onConnectionChanged?.call(deviceId, connectionState);
     } else if (message['ServiceState'] != null) {
       if (message['ServiceState'] == 'discovered') {
         String deviceId = message['deviceId'];
         String service = message['service'];
-        List<String> characteristics =
-            (message['characteristics'] as List).cast();
+        List<String> characteristics = (message['characteristics'] as List)
+            .cast();
         onServiceDiscovered?.call(deviceId, service, characteristics);
       }
     } else if (message['characteristicValue'] != null) {
@@ -118,7 +124,8 @@ class MethodChannelQuickBlue extends QuickBluePlatform {
       var characteristicValue = message['characteristicValue'];
       String characteristic = characteristicValue['characteristic'];
       Uint8List value = Uint8List.fromList(
-          characteristicValue['value']); // In case of _Uint8ArrayView
+        characteristicValue['value'],
+      ); // In case of _Uint8ArrayView
       onValueChanged?.call(deviceId, characteristic, value);
     } else if (message['mtuConfig'] != null) {
       _mtuConfigController.add(message['mtuConfig']);
@@ -129,61 +136,60 @@ class MethodChannelQuickBlue extends QuickBluePlatform {
     } else if (message['type'] == 'bluetoothAvailabilityChanged') {
       _bluetoothAvailabilityController.add(message['available'] as bool);
     } else if (message['type'] != null) {
-      _eventMessageController
-          .add(BleEvent.parse(message["type"]).package(message));
+      _eventMessageController.add(
+        BleEvent.parse(message["type"]).package(message),
+      );
     } else {
       print('unknown message: $message');
     }
   }
 
   @override
-  Future<void> setNotifiable(String deviceId, String service,
-      String characteristic, BleInputProperty bleInputProperty) async {
-    _method.invokeMethod('setNotifiable', {
-      'deviceId': deviceId,
-      'service': service,
-      'characteristic': characteristic,
-      'bleInputProperty': bleInputProperty.value,
-    }).then((_) => _log('setNotifiable invokeMethod success'));
+  Future<void> setNotifiable(
+    String deviceId,
+    String service,
+    String characteristic,
+    BleInputProperty bleInputProperty,
+  ) async {
+    await _method
+        .invokeMethod('setNotifiable', {
+          'deviceId': deviceId,
+          'service': service,
+          'characteristic': characteristic,
+          'bleInputProperty': bleInputProperty.value,
+        })
+        .then((_) => _log('setNotifiable invokeMethod success'));
   }
 
   @override
   Future<void> readValue(
-      String deviceId, String service, String characteristic) async {
-    _method.invokeMethod('readValue', {
-      'deviceId': deviceId,
-      'service': service,
-      'characteristic': characteristic,
-    }).then((_) => _log('readValue invokeMethod success'));
+    String deviceId,
+    String service,
+    String characteristic,
+  ) async {
+    _method
+        .invokeMethod('readValue', {
+          'deviceId': deviceId,
+          'service': service,
+          'characteristic': characteristic,
+        })
+        .then((_) => _log('readValue invokeMethod success'));
   }
 
   @override
   Future<void> writeValue(
-      String deviceId,
-      String service,
-      String characteristic,
-      Uint8List value,
-      BleOutputProperty bleOutputProperty) async {
-    _method.invokeMethod('writeValue', {
+    String deviceId,
+    String service,
+    String characteristic,
+    Uint8List value,
+    BleOutputProperty bleOutputProperty,
+  ) async {
+    await _method.invokeMethod('writeValue', {
       'deviceId': deviceId,
       'service': service,
       'characteristic': characteristic,
       'value': value,
       'bleOutputProperty': bleOutputProperty.value,
-    }).then((_) {
-      _log('writeValue invokeMethod success', logLevel: Level.ALL);
-    }).catchError((onError) {
-      // sometimes android reports a fialed write, but writes the value anyways
-      if (Platform.isAndroid) {
-        bleEventStream.firstWhere((x) {
-          return x.data is CharacteristicWriteEvent &&
-              listEquals(value, (x.data as CharacteristicWriteEvent).value);
-        }).timeout(Duration(milliseconds: 1250), onTimeout: () {
-          throw onError;
-        });
-      } else {
-        throw onError;
-      }
     });
   }
 
@@ -192,11 +198,17 @@ class MethodChannelQuickBlue extends QuickBluePlatform {
 
   @override
   Future<int> requestMtu(String deviceId, int expectedMtu) async {
-    _method.invokeMethod('requestMtu', {
-      'deviceId': deviceId,
-      'expectedMtu': expectedMtu,
-    }).then((_) => _log('requestMtu invokeMethod success'));
-    return await _mtuConfigController.stream.first;
+    final configured = _mtuConfigController.stream.first.timeout(
+      const Duration(seconds: 5),
+    );
+    configured.ignore();
+    await _method
+        .invokeMethod('requestMtu', {
+          'deviceId': deviceId,
+          'expectedMtu': expectedMtu,
+        })
+        .then((_) => _log('requestMtu invokeMethod success'));
+    return await configured;
   }
 
   Future<void> readRssi(String deviceId) async {
@@ -212,9 +224,11 @@ class MethodChannelQuickBlue extends QuickBluePlatform {
 
   @override
   void requestLatency(String deviceId, BlePackageLatency priority) {
-    _method.invokeMethod('requestLatency', {
-      'deviceId': deviceId,
-      'priority': priority.value,
-    }).then((_) => _log("requestConnectionPriority invokeMethod success"));
+    _method
+        .invokeMethod('requestLatency', {
+          'deviceId': deviceId,
+          'priority': priority.value,
+        })
+        .then((_) => _log("requestConnectionPriority invokeMethod success"));
   }
 }
