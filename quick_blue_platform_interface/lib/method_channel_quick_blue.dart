@@ -106,7 +106,10 @@ class MethodChannelQuickBlue extends QuickBluePlatform {
           BlueConnectionState.parse(message['ConnectionState']);
       onConnectionChanged?.call(deviceId, connectionState);
     } else if (message['ServiceState'] != null) {
-      if (message['ServiceState'] == 'discovered') {
+      if (message['ServiceState'] == 'discovered' &&
+          message['deviceId'] is String &&
+          message['service'] is String &&
+          message['characteristics'] is List) {
         String deviceId = message['deviceId'];
         String service = message['service'];
         List<String> characteristics =
@@ -164,7 +167,7 @@ class MethodChannelQuickBlue extends QuickBluePlatform {
       String characteristic,
       Uint8List value,
       BleOutputProperty bleOutputProperty) async {
-    _method.invokeMethod('writeValue', {
+    await _method.invokeMethod('writeValue', {
       'deviceId': deviceId,
       'service': service,
       'characteristic': characteristic,
@@ -172,10 +175,10 @@ class MethodChannelQuickBlue extends QuickBluePlatform {
       'bleOutputProperty': bleOutputProperty.value,
     }).then((_) {
       _log('writeValue invokeMethod success', logLevel: Level.ALL);
-    }).catchError((onError) {
+    }).catchError((onError) async {
       // sometimes android reports a fialed write, but writes the value anyways
       if (Platform.isAndroid) {
-        bleEventStream.firstWhere((x) {
+        await bleEventStream.firstWhere((x) {
           return x.data is CharacteristicWriteEvent &&
               listEquals(value, (x.data as CharacteristicWriteEvent).value);
         }).timeout(Duration(milliseconds: 1250), onTimeout: () {

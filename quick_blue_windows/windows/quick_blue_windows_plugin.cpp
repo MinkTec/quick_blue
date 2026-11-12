@@ -1,4 +1,5 @@
 #include "include/quick_blue_windows/quick_blue_windows_plugin.h"
+#include "service_uuid.h"
 
 // This must be included before many other Windows headers.
 #include <windows.h>
@@ -6,6 +7,7 @@
 #include <winrt/Windows.Devices.Bluetooth.GenericAttributeProfile.h>
 #include <winrt/Windows.Devices.Bluetooth.h>
 #include <winrt/Windows.Devices.Radios.h>
+#include <winrt/Windows.Devices.Enumeration.h>
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Storage.Streams.h>
@@ -19,9 +21,13 @@
 #include <flutter/standard_method_codec.h>
 
 #include <algorithm>
+#include <atomic>
+#include <deque>
+#include <functional>
 #include <iomanip>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <sstream>
 
 #define GUID_FORMAT                                                            \
@@ -250,9 +256,9 @@ parseManufacturerDataHead(BluetoothLEAdvertisement advertisement) {
     return std::vector<uint8_t>();
 
   auto manufacturerData = advertisement.ManufacturerData().GetAt(0);
-  // FIXME Compat with REG_DWORD_BIG_ENDIAN
-  uint8_t *prefix = uint16_t_union{manufacturerData.CompanyId()}.bytes;
-  auto result = std::vector<uint8_t>{prefix, prefix + sizeof(uint16_t_union)};
+  const auto company = manufacturerData.CompanyId();
+  auto result = std::vector<uint8_t>{static_cast<uint8_t>(company & 0xff),
+                                     static_cast<uint8_t>(company >> 8)};
 
   auto data = to_bytevc(manufacturerData.Data());
   result.insert(result.end(), data.begin(), data.end());
@@ -293,16 +299,36 @@ private:
   Radio bluetoothRadio{nullptr};
 
   BluetoothLEAdvertisementWatcher bluetoothLEWatcher{nullptr};
+  std::atomic<uint64_t> scanGeneration_{0};
+  struct ScanDelivery {
+    std::mutex mutex;
+    HWND window = nullptr;
+    UINT message = RegisterWindowMessage(L"quick_blue_windows.scan_result");
+    std::deque<std::pair<uint64_t, BluetoothLEAdvertisementReceivedEventArgs>>
+        pending;
+    std::deque<std::function<void()>> tasks;
+    std::map<uint64_t, uint64_t> connectionGenerations;
+  };
+  std::shared_ptr<ScanDelivery> scanDelivery_ = std::make_shared<ScanDelivery>();
+  flutter::PluginRegistrarWindows* registrar_ = nullptr;
+  int windowProcId_ = -1;
+  void SendConnectionMessage(EncodableValue message) {
+    PostPlatformTask(scanDelivery_, [this, message = std::move(message)]() {
+      message_connector_->Send(message);
+    });
+  }
+  static void PostPlatformTask(const std::shared_ptr<ScanDelivery>& delivery,
+                               std::function<void()> task);
+  static winrt::fire_and_forget GetSystemConnectedDevicesAsync(
+      std::shared_ptr<ScanDelivery> delivery, std::string serviceId,
+      std::shared_ptr<flutter::MethodResult<EncodableValue>> result);
   winrt::event_token bluetoothLEWatcherReceivedToken;
-  void
-  BluetoothLEWatcher_Received(BluetoothLEAdvertisementWatcher sender,
-                              BluetoothLEAdvertisementReceivedEventArgs args);
-  winrt::fire_and_forget
-  SendScanResultAsync(BluetoothLEAdvertisementReceivedEventArgs args);
+  void SendScanResult(BluetoothLEAdvertisementReceivedEventArgs args);
 
   std::map<uint64_t, std::unique_ptr<BluetoothDeviceAgent>> connectedDevices{};
 
-  winrt::fire_and_forget ConnectAsync(uint64_t bluetoothAddress);
+  winrt::fire_and_forget ConnectAsync(uint64_t bluetoothAddress,
+                                     uint64_t generation);
   void BluetoothLEDevice_ConnectionStatusChanged(BluetoothLEDevice sender,
                                                  IInspectable args);
   void CleanConnection(uint64_t bluetoothAddress);
@@ -342,6 +368,26 @@ void QuickBlueWindowsPlugin::RegisterWithRegistrar(
           &flutter::StandardMessageCodec::GetInstance());
 
   auto plugin = std::make_unique<QuickBlueWindowsPlugin>();
+  plugin->registrar_ = registrar;
+  plugin->windowProcId_ = registrar->RegisterTopLevelWindowProcDelegate(
+      [pointer = plugin.get()](HWND, UINT message, WPARAM, LPARAM)
+          -> std::optional<LRESULT> {
+        if (message != pointer->scanDelivery_->message) return std::nullopt;
+        decltype(pointer->scanDelivery_->pending) pending;
+        std::deque<std::function<void()>> tasks;
+        {
+          std::lock_guard<std::mutex> lock(pointer->scanDelivery_->mutex);
+          pending.swap(pointer->scanDelivery_->pending);
+          tasks.swap(pointer->scanDelivery_->tasks);
+        }
+        for (auto& task : tasks) task();
+        for (const auto& entry : pending) {
+          if (entry.first == pointer->scanGeneration_.load()) {
+            pointer->SendScanResult(entry.second);
+          }
+        }
+        return 0;
+      });
 
   method->SetMethodCallHandler(
       [plugin_pointer = plugin.get()](const auto &call, auto result) {
@@ -368,7 +414,23 @@ void QuickBlueWindowsPlugin::RegisterWithRegistrar(
 
 QuickBlueWindowsPlugin::QuickBlueWindowsPlugin() { InitializeAsync(); }
 
-QuickBlueWindowsPlugin::~QuickBlueWindowsPlugin() {}
+QuickBlueWindowsPlugin::~QuickBlueWindowsPlugin() {
+  {
+    std::lock_guard<std::mutex> lock(scanDelivery_->mutex);
+    scanDelivery_->window = nullptr;
+    scanDelivery_->pending.clear();
+    scanDelivery_->tasks.clear();
+  }
+  if (bluetoothLEWatcher) {
+    try {
+      bluetoothLEWatcher.Received(bluetoothLEWatcherReceivedToken);
+      bluetoothLEWatcher.Stop();
+    } catch (const winrt::hresult_error&) {
+      // The radio may already have disappeared during application shutdown.
+    }
+  }
+  if (registrar_) registrar_->UnregisterTopLevelWindowProcDelegate(windowProcId_);
+}
 
 winrt::fire_and_forget QuickBlueWindowsPlugin::InitializeAsync() {
   auto bluetoothAdapter = co_await BluetoothAdapter::GetDefaultAsync();
@@ -379,20 +441,102 @@ void QuickBlueWindowsPlugin::HandleMethodCall(
     const flutter::MethodCall<flutter::EncodableValue> &method_call,
     std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
   auto method_name = method_call.method_name();
+  {
+    std::lock_guard<std::mutex> lock(scanDelivery_->mutex);
+    scanDelivery_->window = GetAncestor(
+        registrar_->GetView()->GetNativeWindow(), GA_ROOT);
+  }
   OutputDebugString(
       (L"HandleMethodCall " + winrt::to_hstring(method_name) + L"\n").c_str());
   if (method_name.compare("isBluetoothAvailable") == 0) {
     result->Success(EncodableValue(bluetoothRadio &&
                                    bluetoothRadio.State() == RadioState::On));
-  } else if (method_name.compare("startScan") == 0) {
-    if (!bluetoothLEWatcher) {
-      bluetoothLEWatcher = BluetoothLEAdvertisementWatcher();
-      bluetoothLEWatcherReceivedToken = bluetoothLEWatcher.Received(
-          {this, &QuickBlueWindowsPlugin::BluetoothLEWatcher_Received});
+  } else if (method_name.compare("getSystemConnectedDevices") == 0) {
+    const auto* args = method_call.arguments()
+        ? std::get_if<EncodableMap>(method_call.arguments()) : nullptr;
+    const auto service = args ? args->find(EncodableValue("serviceId"))
+                              : EncodableMap::const_iterator{};
+    const auto* value = args && service != args->end()
+        ? std::get_if<std::string>(&service->second) : nullptr;
+    const auto uuid = value ? quick_blue::NormalizeServiceUuid(*value)
+                            : std::nullopt;
+    if (!uuid) {
+      result->Error("invalid_service_uuid", "A service UUID is required.");
+      return;
     }
+    GetSystemConnectedDevicesAsync(scanDelivery_, *uuid, std::move(result));
+  } else if (method_name.compare("startScan") == 0) {
+    std::optional<std::string> serviceId;
+    if (method_call.arguments()) {
+      const auto* args = std::get_if<EncodableMap>(method_call.arguments());
+      if (!args) {
+        result->Error("invalid_arguments", "Scan arguments must be a map.");
+        return;
+      }
+      const auto service = args->find(EncodableValue("serviceId"));
+      if (service != args->end() &&
+          !std::holds_alternative<std::monostate>(service->second)) {
+        const auto* value = std::get_if<std::string>(&service->second);
+        if (!value || !(serviceId = quick_blue::NormalizeServiceUuid(*value))) {
+          result->Error("invalid_service_uuid",
+                        "Expected a Bluetooth service UUID.");
+          return;
+        }
+      }
+    }
+    // Filters cannot be changed on a running watcher. Recreate it so switching
+    // from filtered to unfiltered scans cannot retain an old service filter.
+    const auto generation = ++scanGeneration_;
+    {
+      std::lock_guard<std::mutex> lock(scanDelivery_->mutex);
+      // Plugin registration precedes runner reparenting of the Flutter view.
+      // Resolve its top-level window only once scanning is actually requested.
+      scanDelivery_->window = GetAncestor(
+          registrar_->GetView()->GetNativeWindow(), GA_ROOT);
+      scanDelivery_->pending.clear();
+    }
+    if (bluetoothLEWatcher) {
+      bluetoothLEWatcher.Stop();
+      bluetoothLEWatcher.Received(bluetoothLEWatcherReceivedToken);
+    }
+    bluetoothLEWatcher = BluetoothLEAdvertisementWatcher();
+    bluetoothLEWatcher.ScanningMode(BluetoothLEScanningMode::Active);
+    std::optional<winrt::guid> requestedUuid;
+    if (serviceId) {
+      GUID uuid{};
+      winrt::check_hresult(IIDFromString(
+          winrt::to_hstring("{" + *serviceId + "}").c_str(), &uuid));
+      requestedUuid = winrt::guid(uuid);
+      bluetoothLEWatcher.AdvertisementFilter().Advertisement().ServiceUuids()
+          .Append(*requestedUuid);
+    }
+    const auto delivery = scanDelivery_;
+    bluetoothLEWatcherReceivedToken = bluetoothLEWatcher.Received(
+        [delivery, generation, requestedUuid](
+            BluetoothLEAdvertisementWatcher,
+            BluetoothLEAdvertisementReceivedEventArgs args) {
+          // Also enforce the advertised UUID here: radio/driver filtering must
+          // never leak unrelated devices into a service-specific scan.
+          if (requestedUuid) {
+            bool matches = false;
+            for (const auto uuid : args.Advertisement().ServiceUuids()) {
+              if (uuid == *requestedUuid) {
+                matches = true;
+                break;
+              }
+            }
+            if (!matches) return;
+          }
+          std::lock_guard<std::mutex> lock(delivery->mutex);
+          if (!delivery->window) return;
+          const bool notify = delivery->pending.empty();
+          delivery->pending.emplace_back(generation, args);
+          if (notify) PostMessage(delivery->window, delivery->message, 0, 0);
+        });
     bluetoothLEWatcher.Start();
     result->Success(nullptr);
   } else if (method_name.compare("stopScan") == 0) {
+    ++scanGeneration_;
     if (bluetoothLEWatcher) {
       bluetoothLEWatcher.Stop();
       bluetoothLEWatcher.Received(bluetoothLEWatcherReceivedToken);
@@ -402,12 +546,23 @@ void QuickBlueWindowsPlugin::HandleMethodCall(
   } else if (method_name.compare("connect") == 0) {
     auto args = std::get<EncodableMap>(*method_call.arguments());
     auto deviceId = std::get<std::string>(args[EncodableValue("deviceId")]);
-    ConnectAsync(std::stoull(deviceId));
+    const auto address = std::stoull(deviceId);
+    uint64_t generation;
+    {
+      std::lock_guard<std::mutex> lock(scanDelivery_->mutex);
+      generation = ++scanDelivery_->connectionGenerations[address];
+    }
+    ConnectAsync(address, generation);
     result->Success(nullptr);
   } else if (method_name.compare("disconnect") == 0) {
     auto args = std::get<EncodableMap>(*method_call.arguments());
     auto deviceId = std::get<std::string>(args[EncodableValue("deviceId")]);
-    CleanConnection(std::stoull(deviceId));
+    const auto address = std::stoull(deviceId);
+    {
+      std::lock_guard<std::mutex> lock(scanDelivery_->mutex);
+      ++scanDelivery_->connectionGenerations[address];
+    }
+    CleanConnection(address);
     // TODO send `disconnected` message
     result->Success(nullptr);
   } else if (method_name.compare("discoverServices") == 0) {
@@ -485,17 +640,57 @@ void QuickBlueWindowsPlugin::HandleMethodCall(
   }
 }
 
-void QuickBlueWindowsPlugin::BluetoothLEWatcher_Received(
-    BluetoothLEAdvertisementWatcher sender,
-    BluetoothLEAdvertisementReceivedEventArgs args) {
-  SendScanResultAsync(args);
+void QuickBlueWindowsPlugin::PostPlatformTask(
+    const std::shared_ptr<ScanDelivery>& delivery, std::function<void()> task) {
+  std::lock_guard<std::mutex> lock(delivery->mutex);
+  if (!delivery->window) return;
+  delivery->tasks.push_back(std::move(task));
+  PostMessage(delivery->window, delivery->message, 0, 0);
 }
 
-winrt::fire_and_forget QuickBlueWindowsPlugin::SendScanResultAsync(
+winrt::fire_and_forget QuickBlueWindowsPlugin::GetSystemConnectedDevicesAsync(
+    std::shared_ptr<ScanDelivery> delivery, std::string serviceId,
+    std::shared_ptr<flutter::MethodResult<EncodableValue>> result) {
+  try {
+    GUID nativeUuid{};
+    winrt::check_hresult(IIDFromString(
+        winrt::to_hstring("{" + serviceId + "}").c_str(), &nativeUuid));
+    const auto selector = BluetoothLEDevice::GetDeviceSelectorFromConnectionStatus(
+        BluetoothConnectionStatus::Connected);
+    const auto devices = co_await
+        winrt::Windows::Devices::Enumeration::DeviceInformation::FindAllAsync(selector);
+    EncodableList matches;
+    for (const auto info : devices) {
+      auto device = co_await BluetoothLEDevice::FromIdAsync(info.Id());
+      if (!device) continue;
+      if (device.ConnectionStatus() == BluetoothConnectionStatus::Connected) {
+        const auto services = co_await device.GetGattServicesForUuidAsync(
+            winrt::guid(nativeUuid), BluetoothCacheMode::Cached);
+        if (services.Status() == GattCommunicationStatus::Success &&
+            services.Services().Size() > 0) {
+          matches.push_back(EncodableMap{
+              {"name", winrt::to_string(device.Name())},
+              {"deviceId", std::to_string(device.BluetoothAddress())}});
+        }
+      }
+    }
+    PostPlatformTask(delivery, [result, matches = std::move(matches)]() {
+      result->Success(EncodableValue(matches));
+    });
+  } catch (const winrt::hresult_error& error) {
+    const auto message = winrt::to_string(error.message());
+    PostPlatformTask(delivery, [result, message]() {
+      result->Error("system_connected_devices_failed", message);
+    });
+  }
+}
+
+void QuickBlueWindowsPlugin::SendScanResult(
     BluetoothLEAdvertisementReceivedEventArgs args) {
-  auto device = co_await BluetoothLEDevice::FromBluetoothAddressAsync(
-      args.BluetoothAddress());
-  auto name = device ? device.Name() : args.Advertisement().LocalName();
+  // Advertisements already carry the scan name. Opening a Windows GATT device
+  // for every advertisement creates handles/async work for unrelated devices
+  // and can hold up discovery when the radio/driver is busy.
+  auto name = args.Advertisement().LocalName();
   OutputDebugString((L"Received BluetoothAddress:" +
                      winrt::to_hstring(args.BluetoothAddress()) + L", Name:" +
                      name + L", LocalName:" + args.Advertisement().LocalName() +
@@ -541,20 +736,37 @@ QuickBlueWindowsPlugin::OnCancelInternal(const EncodableValue *arguments) {
 }
 
 winrt::fire_and_forget
-QuickBlueWindowsPlugin::ConnectAsync(uint64_t bluetoothAddress) {
+QuickBlueWindowsPlugin::ConnectAsync(uint64_t bluetoothAddress,
+                                    uint64_t generation) {
+  const auto delivery = scanDelivery_;
+  const auto current = [delivery, bluetoothAddress, generation]() {
+    std::lock_guard<std::mutex> lock(delivery->mutex);
+    return delivery->window &&
+        delivery->connectionGenerations[bluetoothAddress] == generation;
+  };
   try {
     auto device =
         co_await BluetoothLEDevice::FromBluetoothAddressAsync(bluetoothAddress);
 
-    // Check if the device is null
-
+    if (!device) {
+      if (current()) SendConnectionMessage(EncodableMap{
+          {"deviceId", std::to_string(bluetoothAddress)},
+          {"ConnectionState", "disconnected"}});
+      co_return;
+    }
+    if (!current()) { device.Close(); co_return; }
     auto servicesResult = co_await device.GetGattServicesAsync();
+    if (!current()) {
+      for (const auto service : servicesResult.Services()) service.Close();
+      device.Close();
+      co_return;
+    }
     if (servicesResult.Status() != GattCommunicationStatus::Success) {
       OutputDebugString((L"GetGattServicesAsync error: " +
                          winrt::to_hstring((int32_t)servicesResult.Status()) +
                          L"\n")
                             .c_str());
-      message_connector_->Send(EncodableMap{
+      SendConnectionMessage(EncodableMap{
           {"deviceId", std::to_string(bluetoothAddress)},
           {"ConnectionState", "disconnected"},
       });
@@ -568,29 +780,32 @@ QuickBlueWindowsPlugin::ConnectAsync(uint64_t bluetoothAddress) {
     auto pair = std::make_pair(bluetoothAddress, std::move(deviceAgent));
     connectedDevices.insert(std::move(pair));
 
-    message_connector_->Send(EncodableMap{
+    SendConnectionMessage(EncodableMap{
         {"deviceId", std::to_string(bluetoothAddress)},
         {"ConnectionState", "connected"},
     });
   } catch (const winrt::hresult_error &ex) {
+    if (!current()) co_return;
     OutputDebugString((L"ConnectAsync exception: " + ex.message() +
                        L", code: " + winrt::to_hstring(ex.code()) + L"\n")
                           .c_str());
-    message_connector_->Send(EncodableMap{
+    SendConnectionMessage(EncodableMap{
         {"deviceId", std::to_string(bluetoothAddress)},
         {"ConnectionState", "disconnected"},
     });
   } catch (const std::exception &ex) {
+    if (!current()) co_return;
     OutputDebugString(
         (L"ConnectAsync std exception: " + winrt::to_hstring(ex.what()) + L"\n")
             .c_str());
-    message_connector_->Send(EncodableMap{
+    SendConnectionMessage(EncodableMap{
         {"deviceId", std::to_string(bluetoothAddress)},
         {"ConnectionState", "disconnected"},
     });
   } catch (...) {
+    if (!current()) co_return;
     OutputDebugString(L"ConnectAsync unknown exception\n");
-    message_connector_->Send(EncodableMap{
+    SendConnectionMessage(EncodableMap{
         {"deviceId", std::to_string(bluetoothAddress)},
         {"ConnectionState", "disconnected"},
     });
@@ -607,13 +822,14 @@ void QuickBlueWindowsPlugin::BluetoothLEDevice_ConnectionStatusChanged(
             .c_str());
 
     if (sender.ConnectionStatus() == BluetoothConnectionStatus::Disconnected) {
-      // Clean up all resources related to this device
-      CleanConnection(sender.BluetoothAddress());
-
-      // Notify the Dart side
-      message_connector_->Send(EncodableMap{
-          {"deviceId", std::to_string(sender.BluetoothAddress())},
-          {"ConnectionState", "disconnected"},
+      const auto address = sender.BluetoothAddress();
+      PostPlatformTask(scanDelivery_, [this, address, sender]() {
+        const auto found = connectedDevices.find(address);
+        if (found == connectedDevices.end() || found->second->device != sender) return;
+        CleanConnection(address);
+        SendConnectionMessage(EncodableMap{
+            {"deviceId", std::to_string(address)},
+            {"ConnectionState", "disconnected"}});
       });
     }
   } catch (const std::exception &ex) {
@@ -694,7 +910,7 @@ winrt::fire_and_forget QuickBlueWindowsPlugin::DiscoverServicesAsync(
     if (!bluetoothDeviceAgent.device) {
       OutputDebugString(
           L"DiscoverServicesAsync: Device is null or disconnected\n");
-      message_connector_->Send(EncodableMap{
+      SendConnectionMessage(EncodableMap{
           {"deviceId",
            std::to_string(bluetoothDeviceAgent.device.BluetoothAddress())},
           {"ServiceState", "discovered"}});
@@ -708,7 +924,7 @@ winrt::fire_and_forget QuickBlueWindowsPlugin::DiscoverServicesAsync(
                          winrt::to_hstring((int32_t)serviceResult.Status()) +
                          L"\n")
                             .c_str());
-      message_connector_->Send(EncodableMap{
+      SendConnectionMessage(EncodableMap{
           {"deviceId",
            std::to_string(bluetoothDeviceAgent.device.BluetoothAddress())},
           {"ServiceState", "discovered"}});
@@ -729,13 +945,13 @@ winrt::fire_and_forget QuickBlueWindowsPlugin::DiscoverServicesAsync(
         }
         msg.insert({"characteristics", characteristics});
       }
-      message_connector_->Send(msg);
+      SendConnectionMessage(msg);
     }
   } catch (const winrt::hresult_error &ex) {
     OutputDebugString((L"DiscoverServicesAsync exception: " + ex.message() +
                        L", code: " + winrt::to_hstring(ex.code()) + L"\n")
                           .c_str());
-    message_connector_->Send(EncodableMap{
+    SendConnectionMessage(EncodableMap{
         {"deviceId",
          std::to_string(bluetoothDeviceAgent.device.BluetoothAddress())},
         {"ServiceState", "discovered"}});
@@ -743,13 +959,13 @@ winrt::fire_and_forget QuickBlueWindowsPlugin::DiscoverServicesAsync(
     OutputDebugString((L"DiscoverServicesAsync std exception: " +
                        winrt::to_hstring(ex.what()) + L"\n")
                           .c_str());
-    message_connector_->Send(EncodableMap{
+    SendConnectionMessage(EncodableMap{
         {"deviceId",
          std::to_string(bluetoothDeviceAgent.device.BluetoothAddress())},
         {"ServiceState", "discovered"}});
   } catch (...) {
     OutputDebugString(L"DiscoverServicesAsync unknown exception\n");
-    message_connector_->Send(EncodableMap{
+    SendConnectionMessage(EncodableMap{
         {"deviceId",
          std::to_string(bluetoothDeviceAgent.device.BluetoothAddress())},
         {"ServiceState", "discovered"}});
@@ -775,7 +991,7 @@ winrt::fire_and_forget QuickBlueWindowsPlugin::RequestMtuAsync(
       co_return;
     }
 
-    message_connector_->Send(EncodableMap{
+    SendConnectionMessage(EncodableMap{
         {"mtuConfig", (int64_t)gattSession.MaxPduSize()},
     });
   } catch (const winrt::hresult_error &ex) {
@@ -949,7 +1165,7 @@ winrt::fire_and_forget QuickBlueWindowsPlugin::ReadValueAsync(
     OutputDebugString((L"ReadValueAsync " + winrt::to_hstring(characteristic) +
                        L", " + winrt::to_hstring(to_hexstring(bytes)) + L"\n")
                           .c_str());
-    message_connector_->Send(EncodableMap{
+    SendConnectionMessage(EncodableMap{
         {"deviceId",
          std::to_string(
              gattCharacteristic.Service().Device().BluetoothAddress())},
@@ -1108,7 +1324,7 @@ void QuickBlueWindowsPlugin::GattCharacteristic_ValueChanged(
                           .c_str());
 
     // Send the value back to Dart
-    message_connector_->Send(EncodableMap{
+    SendConnectionMessage(EncodableMap{
         {"deviceId", std::to_string(deviceAddress)},
         {"characteristicValue",
          EncodableMap{
