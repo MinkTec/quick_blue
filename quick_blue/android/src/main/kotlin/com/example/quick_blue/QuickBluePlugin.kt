@@ -58,6 +58,8 @@ class QuickBluePlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamHand
   }
 
   override fun onDetachedFromEngine(@NonNull binding: FlutterPlugin.FlutterPluginBinding) {
+    knownGatts.toList().forEach { cleanConnection(it) }
+    method.setMethodCallHandler(null)
     if (bluetoothStateReceiverRegistered) {
       context.unregisterReceiver(bluetoothStateReceiver)
       bluetoothStateReceiverRegistered = false
@@ -88,6 +90,58 @@ class QuickBluePlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamHand
 
 
   private val knownGatts = mutableListOf<BluetoothGatt>()
+
+  private data class PendingOperation(
+    val kind: String,
+    val attribute: UUID,
+    val result: Result,
+    val timeout: Runnable
+  )
+
+  // Android accepts only one GATT request at a time, including CCCD writes.
+  // A method-channel reply must mean completion, not merely request acceptance.
+  private val pendingOperations = mutableMapOf<BluetoothGatt, PendingOperation>()
+
+  private fun startOperation(
+    gatt: BluetoothGatt, kind: String, attribute: UUID, result: Result,
+    start: () -> Boolean
+  ) {
+    if (pendingOperations.containsKey(gatt)) {
+      result.error("GattBusy", "Another GATT operation is pending", null)
+      return
+    }
+    val timeout = Runnable {
+      val pending = pendingOperations.remove(gatt) ?: return@Runnable
+      pending.result.error("GattTimeout", "${pending.kind} timed out", null)
+      // Do not let a late callback acknowledge a new operation on this session.
+      cleanConnection(gatt)
+    }
+    pendingOperations[gatt] = PendingOperation(kind, attribute, result, timeout)
+    mainThreadHandler.postDelayed(timeout, 5000)
+    try {
+      if (!start()) failOperation(gatt, "GattRejected", "$kind was rejected")
+    } catch (error: RuntimeException) {
+      failOperation(gatt, "GattError", error.message ?: "$kind failed")
+    }
+  }
+
+  private fun failOperation(gatt: BluetoothGatt, code: String, message: String) {
+    val pending = pendingOperations.remove(gatt) ?: return
+    mainThreadHandler.removeCallbacks(pending.timeout)
+    pending.result.error(code, message, null)
+  }
+
+  private fun completeOperation(gatt: BluetoothGatt, kind: String, attribute: UUID, status: Int) {
+    val pending = pendingOperations[gatt] ?: return
+    if (pending.kind != kind || pending.attribute != attribute) return
+    pendingOperations.remove(gatt)
+    mainThreadHandler.removeCallbacks(pending.timeout)
+    if (status == BluetoothGatt.GATT_SUCCESS) {
+      pending.result.success(null)
+    } else {
+      pending.result.error("GattStatus", "$kind failed with status $status", status)
+    }
+  }
 
   private val knownServicesWithCharacteristics :
           MutableList<Pair<String,Pair<BluetoothGattService,List<BluetoothGattCharacteristic>>>> = mutableListOf();
@@ -187,8 +241,19 @@ class QuickBluePlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamHand
         val bleInputProperty = call.argument<String>("bleInputProperty")!!
         val gatt = knownGatts.find { it.device.address == deviceId }
                 ?: return result.error("IllegalArgument", "Unknown deviceId: $deviceId", null)
-        gatt.setNotifiable(service to characteristic, bleInputProperty)
-        result.success(null)
+        val char = gatt.getCharacteristic(service to characteristic)
+          ?: return result.error("IllegalArgument", "Unknown characteristic: $characteristic", null)
+        val descriptor = char.getDescriptor(DESC__CLIENT_CHAR_CONFIGURATION)
+          ?: return result.error("IllegalArgument", "Missing notification descriptor", null)
+        val (value, enable) = when (bleInputProperty) {
+          "notification" -> BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE to true
+          "indication" -> BluetoothGattDescriptor.ENABLE_INDICATION_VALUE to true
+          else -> BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE to false
+        }
+        startOperation(gatt, "descriptorWrite", descriptor.uuid, result) {
+          descriptor.value = value
+          gatt.setCharacteristicNotification(char, enable) && gatt.writeDescriptor(descriptor)
+        }
       }
       "requestMtu" -> {
         val deviceId = call.argument<String>("deviceId")!!
@@ -236,24 +301,17 @@ class QuickBluePlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamHand
         val gatt = knownGatts.find { it.device.address == deviceId }
                 ?: return result.error("IllegalArgument", "Unknown deviceId: $deviceId", null)
 
-        val serviceObj : BluetoothGattService = gatt.getService(UUID.fromString(service))!!
-
-        var pair : Pair<BluetoothGattService, List<BluetoothGattCharacteristic>>? = knownServicesWithCharacteristics.filter {
-          it.first == deviceId && it.second.first == serviceObj
-        }?.first()?.second
-
-        pair?.let {
-          it.second.filter {
-            it.getUuid() == UUID.fromString(characteristic)
-          }.first()?.let {
-            it.value = value
-            val response = gatt.writeCharacteristic(it);
-            if (response) {
-              result.success(null)
-            } else {
-              result.error("Write characteristic unavailable ${service} ${characteristic}", null, null)
-            }
-          }
+        val char = gatt.getCharacteristic(service to characteristic)
+          ?: return result.error("IllegalArgument", "Unknown characteristic: $characteristic", null)
+        val writeType = when (call.argument<String>("bleOutputProperty")) {
+          "withoutResponse" -> BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+          "withResponse" -> BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+          else -> return result.error("IllegalArgument", "Unknown write property", null)
+        }
+        startOperation(gatt, "characteristicWrite", char.uuid, result) {
+          char.writeType = writeType
+          char.value = value
+          gatt.writeCharacteristic(char)
         }
         return;
       }
@@ -264,7 +322,8 @@ class QuickBluePlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamHand
   }
 
   private fun cleanConnection(gatt: BluetoothGatt) {
-    knownGatts.remove(gatt)
+    failOperation(gatt, "GattDisconnected", "Device disconnected during GATT operation")
+    if (!knownGatts.remove(gatt)) return
     var servicesToRemove = knownServicesWithCharacteristics.filter {
       it.first == gatt.device.address
     }
@@ -315,20 +374,23 @@ class QuickBluePlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamHand
 
   private val gattCallback = object : BluetoothGattCallback() {
     override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
-      Log.v(TAG, "onConnectionStateChange: device(${gatt.device.address}) status($status), newState($newState)")
-      if (newState == BluetoothGatt.STATE_CONNECTED && status == BluetoothGatt.GATT_SUCCESS) {
-        sendMessage(messageConnector, mapOf(
-          "type" to "connected",
-          "deviceId" to gatt.device.address,
-          "ConnectionState" to "connected"
-        ))
-      } else {
-        cleanConnection(gatt)
-        sendMessage(messageConnector, mapOf(
-          "type" to "disconnected",
-          "deviceId" to gatt.device.address,
-          "ConnectionState" to "disconnected"
-        ))
+      mainThreadHandler.post {
+        Log.v(TAG, "onConnectionStateChange: device(${gatt.device.address}) status($status), newState($newState)")
+        if (newState == BluetoothGatt.STATE_CONNECTED && status == BluetoothGatt.GATT_SUCCESS) {
+          if (!knownGatts.contains(gatt)) return@post
+          sendMessage(messageConnector, mapOf(
+            "type" to "connected",
+            "deviceId" to gatt.device.address,
+            "ConnectionState" to "connected"
+          ))
+        } else {
+          cleanConnection(gatt)
+          sendMessage(messageConnector, mapOf(
+            "type" to "disconnected",
+            "deviceId" to gatt.device.address,
+            "ConnectionState" to "disconnected"
+          ))
+        }
       }
     }
 
@@ -392,14 +454,24 @@ class QuickBluePlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamHand
     }
 
     override fun onCharacteristicWrite(gatt: BluetoothGatt?, characteristic: BluetoothGattCharacteristic, status: Int) {
-      Log.v(TAG, "onCharacteristicWrite ${characteristic.uuid}, ${characteristic.value.contentToString()} $status")
-      sendMessage(messageConnector, mapOf(
-        "type" to "characteristicWrite",
-        "deviceId" to gatt?.device?.address.toString(),
-        "characteristic" to characteristic.getUuid().toString(),
-        "value" to characteristic.value,
-        "status" to status
-      ))
+      mainThreadHandler.post {
+        if (gatt != null) completeOperation(gatt, "characteristicWrite", characteristic.uuid, status)
+        Log.v(TAG, "onCharacteristicWrite ${characteristic.uuid}, ${characteristic.value.contentToString()} $status")
+        sendMessage(messageConnector, mapOf(
+          "type" to "characteristicWrite",
+          "deviceId" to gatt?.device?.address.toString(),
+          "characteristic" to characteristic.getUuid().toString(),
+          "value" to characteristic.value,
+          "status" to status
+        ))
+      }
+    }
+
+    override fun onDescriptorWrite(gatt: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
+      mainThreadHandler.post {
+        Log.v(TAG, "onDescriptorWrite ${descriptor.uuid} $status")
+        completeOperation(gatt, "descriptorWrite", descriptor.uuid, status)
+      }
     }
 
     override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
@@ -427,17 +499,6 @@ fun Short.toByteArray(byteOrder: ByteOrder = ByteOrder.LITTLE_ENDIAN): ByteArray
         ByteBuffer.allocate(2 /*Short.SIZE_BYTES*/).order(byteOrder).putShort(this).array()
 
 fun BluetoothGatt.getCharacteristic(serviceCharacteristic: Pair<String, String>) =
-        getService(UUID.fromString(serviceCharacteristic.first)).getCharacteristic(UUID.fromString(serviceCharacteristic.second))
+        getService(UUID.fromString(serviceCharacteristic.first))?.getCharacteristic(UUID.fromString(serviceCharacteristic.second))
 
 private val DESC__CLIENT_CHAR_CONFIGURATION = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
-
-fun BluetoothGatt.setNotifiable(serviceCharacteristic: Pair<String, String>, bleInputProperty: String) {
-  val descriptor = getCharacteristic(serviceCharacteristic).getDescriptor(DESC__CLIENT_CHAR_CONFIGURATION)
-  val (value, enable) = when (bleInputProperty) {
-    "notification" -> BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE to true
-    "indication" -> BluetoothGattDescriptor.ENABLE_INDICATION_VALUE to true
-    else -> BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE to false
-  }
-  descriptor.value = value
-  setCharacteristicNotification(descriptor.characteristic, enable) && writeDescriptor(descriptor)
-}

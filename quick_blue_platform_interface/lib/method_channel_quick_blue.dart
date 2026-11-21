@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:io';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:logging/logging.dart';
 import 'package:quick_blue_platform_interface/ble_events.dart';
@@ -175,18 +174,6 @@ class MethodChannelQuickBlue extends QuickBluePlatform {
       'bleOutputProperty': bleOutputProperty.value,
     }).then((_) {
       _log('writeValue invokeMethod success', logLevel: Level.ALL);
-    }).catchError((onError) async {
-      // sometimes android reports a fialed write, but writes the value anyways
-      if (Platform.isAndroid) {
-        await bleEventStream.firstWhere((x) {
-          return x.data is CharacteristicWriteEvent &&
-              listEquals(value, (x.data as CharacteristicWriteEvent).value);
-        }).timeout(Duration(milliseconds: 1250), onTimeout: () {
-          throw onError;
-        });
-      } else {
-        throw onError;
-      }
     });
   }
 

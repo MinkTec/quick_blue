@@ -1,3 +1,11 @@
+## Unreleased
+
+- Android notification setup now waits for the CCCD write callback before
+  completing, preventing the first sensor command from racing subscription setup.
+- Android characteristic writes honor the requested response mode and complete
+  on the native callback. Native failures, disconnects, and missing callbacks
+  fail the awaiting caller instead of reporting an accepted request as success.
+
 ## [0.5.0-dev.2] - 2022.6.3
 
 - Update federated plugins' versions
